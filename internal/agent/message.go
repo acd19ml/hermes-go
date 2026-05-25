@@ -3,6 +3,7 @@ package agent
 // Role constants for Message.Role.
 // Use these instead of bare strings to prevent typos and enable grep.
 const (
+	RoleSystem    = "system"    // OpenAI-style system prompt; first message in the list
 	RoleUser      = "user"
 	RoleAssistant = "assistant"
 	RoleTool      = "tool"

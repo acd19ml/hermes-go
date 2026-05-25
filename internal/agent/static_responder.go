@@ -1,25 +1,33 @@
 package agent
 
-// StaticResponder is a concrete Responder that always returns a fixed
+import "context"
+
+// StaticResponder is a concrete chatClient that always returns a fixed
 // assistant message without calling any external API. It serves two purposes:
 //
 //  1. End-to-end verification of the CLI --msg path before a real LLM client
 //     exists (Phase 0.3).
-//  2. A test stand-in for Phase 1 unit tests once the minimal chatClient
-//     interface is extracted (Phase 1.2 requires two production implementations;
-//     StaticResponder + AnthropicClient will be those two).
+//  2. A test stand-in (test double) injected via NewAIAgent in unit tests,
+//     eliminating the need for a real API key during testing.
 //
-// Respond signature carries error so it aligns with the future chatClient
-// interface without requiring a breaking change to StaticResponder.
+// StaticResponder satisfies the chatClient interface extracted in Phase 1 c2.
 type StaticResponder struct{}
 
-// Respond accepts a user Message and returns a fixed assistant Message.
-// The response content is "hermes-go (static): " followed by the input
-// content, making it easy to verify round-trip behaviour in tests.
+// Respond accepts the full message list (including any leading system message)
+// and returns a fixed assistant Message. Only the last user message's Content
+// is echoed; system messages are ignored.
 // It never returns a non-nil error.
-func (s StaticResponder) Respond(msg Message) (Message, error) {
+func (s StaticResponder) Respond(_ context.Context, msgs []Message) (Message, error) {
+	// Find the last user message to echo; fall back to empty content.
+	content := ""
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role == RoleUser {
+			content = msgs[i].Content
+			break
+		}
+	}
 	return Message{
 		Role:    RoleAssistant,
-		Content: "hermes-go (static): " + msg.Content,
+		Content: "hermes-go (static): " + content,
 	}, nil
 }

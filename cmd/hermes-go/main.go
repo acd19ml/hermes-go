@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"io"
@@ -21,6 +22,7 @@ func run(args []string, stdout io.Writer, stderr io.Writer) int {
 
 	showVersion := flags.Bool("version", false, "print version and exit")
 	msg := flags.String("msg", "", "send a message and print the response")
+	configure := flags.Bool("configure", false, "run the interactive configuration wizard")
 
 	if err := flags.Parse(args); err != nil {
 		return 2
@@ -31,10 +33,20 @@ func run(args []string, stdout io.Writer, stderr io.Writer) int {
 		return 2
 	}
 
+	// --configure: interactive wizard (reads stdin directly).
+	if *configure {
+		return runConfigure(stdout, stderr)
+	}
+
 	// --msg takes priority over --version and the no-args version banner.
 	if flags.Lookup("msg").Value.String() != "" || isFlagSet(flags, "msg") {
-		in := agent.Message{Role: agent.RoleUser, Content: *msg}
-		resp, err := agent.StaticResponder{}.Respond(in)
+		client, err := agent.NewOpenAIChatClientFromEnv()
+		if err != nil {
+			fmt.Fprintf(stderr, "error: %v\n", err)
+			return 1
+		}
+		a := agent.NewAIAgent(client)
+		resp, err := a.RunOnce(context.Background(), *msg)
 		if err != nil {
 			fmt.Fprintf(stderr, "error: %v\n", err)
 			return 1
