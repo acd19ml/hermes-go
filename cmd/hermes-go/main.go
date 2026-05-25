@@ -46,7 +46,10 @@ func run(args []string, stdout io.Writer, stderr io.Writer) int {
 			return 1
 		}
 		a := agent.NewAIAgent(client)
-		resp, err := a.RunOnce(context.Background(), *msg)
+		// RunConversation drives the full LLM → tool_call → result → LLM loop.
+		// maxIter=10 allows up to 10 LLM calls before giving up; single-turn
+		// responses (no tool_calls) exit after the first call, same as RunOnce.
+		resp, err := a.RunConversation(context.Background(), *msg, 10)
 		if err != nil {
 			fmt.Fprintf(stderr, "error: %v\n", err)
 			return 1
