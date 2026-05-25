@@ -27,10 +27,20 @@ type AIAgent struct {
 	systemPrompt string // set in c3; byte-static after construction
 }
 
-// NewAIAgent constructs an AIAgent with the provided client.
-// Dependency injection allows tests to pass StaticResponder without a real key.
+// defaultSystemPrompt is the hardcoded system prompt injected at the start of
+// every conversation. It is set once at construction and never changed
+// (byte-static invariant): the same bytes appear in every call within the
+// same AIAgent lifetime, enabling Anthropic prompt prefix caching (Phase 4).
+const defaultSystemPrompt = "You are hermes-go, a helpful AI assistant."
+
+// NewAIAgent constructs an AIAgent with the provided client and injects the
+// default system prompt. Dependency injection allows tests to pass
+// StaticResponder without a real key.
 func NewAIAgent(client chatClient) *AIAgent {
-	return &AIAgent{client: client}
+	return &AIAgent{
+		client:       client,
+		systemPrompt: defaultSystemPrompt,
+	}
 }
 
 // RunOnce sends a single user message to the LLM and returns the assistant
