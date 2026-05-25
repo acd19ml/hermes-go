@@ -70,6 +70,9 @@ func TestAIAgentSystemPromptPrepended(t *testing.T) {
 // TestAIAgentSystemPromptByteStatic verifies the byte-static invariant: two
 // successive RunOnce calls on the same AIAgent produce identical system message
 // bytes. This is required for Anthropic prompt prefix caching (Phase 4).
+//
+// Budget is set to 2 so both calls succeed; we are testing system prompt
+// stability, not budget enforcement (see budget_test.go for that).
 func TestAIAgentSystemPromptByteStatic(t *testing.T) {
 	var calls [][]Message
 	spy := spyClient{
@@ -78,6 +81,7 @@ func TestAIAgentSystemPromptByteStatic(t *testing.T) {
 	}
 
 	a := NewAIAgent(spy)
+	a.budget.Max = 2 // allow two iterations for this invariant test
 	for i := 0; i < 2; i++ {
 		if _, err := a.RunOnce(context.Background(), "hello"); err != nil {
 			t.Fatalf("call %d: unexpected error: %v", i, err)

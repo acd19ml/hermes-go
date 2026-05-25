@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"fmt"
 )
 
 // chatClient is the internal interface satisfied by all LLM provider clients.
@@ -18,13 +19,14 @@ type chatClient interface {
 
 // AIAgent orchestrates a single LLM interaction.
 //
-// Fields are populated across Phase 1 commits:
-//   - client       — injected at construction (c2)
-//   - systemPrompt — hardcoded at construction (c3); byte-static after construction
-//   - budget       — IterationBudget controlling max LLM calls (c4)
+// Fields:
+//   - client       — injected at construction; satisfies chatClient
+//   - systemPrompt — hardcoded at construction; byte-static after construction
+//   - budget       — caps the number of LLM calls; Phase 1 sets Max=1
 type AIAgent struct {
 	client       chatClient
-	systemPrompt string // set in c3; byte-static after construction
+	systemPrompt string         // byte-static after construction
+	budget       IterationBudget
 }
 
 // defaultSystemPrompt is the hardcoded system prompt injected at the start of
@@ -33,21 +35,29 @@ type AIAgent struct {
 // same AIAgent lifetime, enabling Anthropic prompt prefix caching (Phase 4).
 const defaultSystemPrompt = "You are hermes-go, a helpful AI assistant."
 
-// NewAIAgent constructs an AIAgent with the provided client and injects the
-// default system prompt. Dependency injection allows tests to pass
-// StaticResponder without a real key.
+// NewAIAgent constructs an AIAgent with the provided client, injects the
+// default system prompt, and sets the iteration budget to 1 (Phase 1
+// single-turn). Dependency injection allows tests to pass StaticResponder
+// without a real key.
 func NewAIAgent(client chatClient) *AIAgent {
 	return &AIAgent{
 		client:       client,
 		systemPrompt: defaultSystemPrompt,
+		budget:       IterationBudget{Max: 1},
 	}
 }
 
 // RunOnce sends a single user message to the LLM and returns the assistant
-// reply. It prepends the system prompt when non-empty (c3).
+// reply. It enforces the iteration budget, then prepends the system prompt
+// as the first message before calling the client.
 //
-// Budget enforcement is added in c4.
+// Returns an error if the budget is exhausted (client is never called) or if
+// the underlying client call fails.
 func (a *AIAgent) RunOnce(ctx context.Context, userMsg string) (Message, error) {
+	if err := a.budget.Consume(); err != nil {
+		return Message{}, fmt.Errorf("agent: %w", err)
+	}
+
 	msgs := []Message{}
 	if a.systemPrompt != "" {
 		msgs = append(msgs, Message{Role: RoleSystem, Content: a.systemPrompt})
