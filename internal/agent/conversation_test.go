@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -333,6 +334,274 @@ func TestValidateToolPairingEmpty(t *testing.T) {
 	for _, msgs := range cases {
 		if err := validateToolPairing(msgs); err != nil {
 			t.Errorf("validateToolPairing(%v) = %v, want nil", msgs, err)
+		}
+	}
+}
+
+// ── Phase 2 c5: no-progress guardrail ─────────────────────────────────────────
+
+// TestToolCallKey verifies that toolCallKey produces stable, order-sensitive
+// fingerprints.  The key must encode name and arguments but must be independent
+// of the tool-call ID (IDs change on every generation, so including them would
+// prevent loop detection even when the logical request is identical).
+func TestToolCallKey(t *testing.T) {
+	single := []ToolCall{{ID: "call_1", Name: "echo", Arguments: `{"text":"hi"}`}}
+
+	// Stability: same input → same key.
+	if k1, k2 := toolCallKey(single), toolCallKey(single); k1 != k2 {
+		t.Errorf("same input produced different keys: %q vs %q", k1, k2)
+	}
+
+	// ID independence: changing only the ID must not change the key.
+	diffID := []ToolCall{{ID: "call_999", Name: "echo", Arguments: `{"text":"hi"}`}}
+	if toolCallKey(single) != toolCallKey(diffID) {
+		t.Error("key should be independent of tool_call ID")
+	}
+
+	// Different name → different key.
+	diffName := []ToolCall{{Name: "search", Arguments: `{"text":"hi"}`}}
+	if toolCallKey(single) == toolCallKey(diffName) {
+		t.Error("different names should produce different keys")
+	}
+
+	// Different arguments → different key.
+	diffArgs := []ToolCall{{Name: "echo", Arguments: `{"text":"bye"}`}}
+	if toolCallKey(single) == toolCallKey(diffArgs) {
+		t.Error("different arguments should produce different keys")
+	}
+
+	// nil / empty → "".
+	if got := toolCallKey(nil); got != "" {
+		t.Errorf("nil slice: want \"\", got %q", got)
+	}
+	if got := toolCallKey([]ToolCall{}); got != "" {
+		t.Errorf("empty slice: want \"\", got %q", got)
+	}
+
+	// Order sensitivity: [a,b] must differ from [b,a].
+	ab := []ToolCall{{Name: "a"}, {Name: "b"}}
+	ba := []ToolCall{{Name: "b"}, {Name: "a"}}
+	if toolCallKey(ab) == toolCallKey(ba) {
+		t.Error("key order should matter: [a,b] must differ from [b,a]")
+	}
+}
+
+// TestNoProgressHardStop verifies that RunConversation returns a "no-progress"
+// error when the model repeats the same tool call beyond maxNoProgressWarnings.
+//
+// Expected call count: 1 (first occurrence, no flag) + 3 (warned) + 1 (hard-stop) = 5.
+func TestNoProgressHardStop(t *testing.T) {
+	callNum := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callNum++
+		w.Header().Set("Content-Type", "application/json")
+		// Always return the same name+args; IDs differ to match realistic behavior.
+		fmt.Fprintf(w,
+			`{"choices":[{"message":{"role":"assistant","content":null,`+
+				`"tool_calls":[{"id":"call_%d","type":"function",`+
+				`"function":{"name":"echo","arguments":"{\"text\":\"loop\"}"}}]},`+
+				`"finish_reason":"tool_calls"}]}`,
+			callNum,
+		)
+	}))
+	defer srv.Close()
+
+	c := &OpenAIChatClient{
+		APIKey:     "sk-test",
+		BaseURL:    srv.URL,
+		Model:      defaultOpenAIModel,
+		httpClient: srv.Client(),
+	}
+	a := NewAIAgent(c)
+
+	_, err := a.RunConversation(context.Background(), "keep looping", 10)
+	if err == nil {
+		t.Fatal("expected no-progress error, got nil")
+	}
+	if !strings.Contains(err.Error(), "no-progress") {
+		t.Errorf("error = %q, want it to mention 'no-progress'", err.Error())
+	}
+	// 1 (normal) + 3 (warned) + 1 (hard-stop detection) = 5 total API calls.
+	if callNum != 5 {
+		t.Errorf("LLM call count = %d, want 5 (1 normal + 3 warned + 1 hard-stop)", callNum)
+	}
+}
+
+// TestNoProgressWarningInjected verifies that after detecting a repeated
+// tool-call pattern, a warning message is injected into the history so the
+// next LLM call can observe it.
+//
+// The server returns the same tool_call on calls 1–2 and a final text answer
+// on call 3.  The body of the third request is decoded and checked for a
+// user-role warning with the expected content.
+func TestNoProgressWarningInjected(t *testing.T) {
+	callNum := 0
+	var thirdBody openAIRequest
+	var decErr error
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callNum++
+		w.Header().Set("Content-Type", "application/json")
+
+		if callNum == 3 {
+			// Capture the third request to inspect injected warning.
+			decErr = json.NewDecoder(r.Body).Decode(&thirdBody)
+			w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"done"}}]}`)) //nolint:errcheck
+			return
+		}
+		// Calls 1 and 2: same name+args, unique IDs (realistic).
+		fmt.Fprintf(w,
+			`{"choices":[{"message":{"role":"assistant","content":null,`+
+				`"tool_calls":[{"id":"call_%d","type":"function",`+
+				`"function":{"name":"echo","arguments":"{\"text\":\"loop\"}"}}]},`+
+				`"finish_reason":"tool_calls"}]}`,
+			callNum,
+		)
+	}))
+	defer srv.Close()
+
+	c := &OpenAIChatClient{
+		APIKey:     "sk-test",
+		BaseURL:    srv.URL,
+		Model:      defaultOpenAIModel,
+		httpClient: srv.Client(),
+	}
+	a := NewAIAgent(c)
+
+	got, err := a.RunConversation(context.Background(), "warn me", 10)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.Content != "done" {
+		t.Errorf("Content = %q, want %q", got.Content, "done")
+	}
+	if decErr != nil {
+		t.Fatalf("failed to decode third request: %v", decErr)
+	}
+
+	// The third call's history must contain the warning injected after call 2's
+	// repeated tool-call detection.  The warning must be a user-role message
+	// (not system or assistant) so it feeds back to the model as user input.
+	found := false
+	for _, m := range thirdBody.Messages {
+		if strings.Contains(m.Content, "no-progress warning") {
+			found = true
+			if m.Role != RoleUser {
+				t.Errorf("warning message role = %q, want %q", m.Role, RoleUser)
+			}
+			break
+		}
+	}
+	if !found {
+		t.Errorf("no-progress warning not found in messages sent to 3rd LLM call; messages = %+v",
+			thirdBody.Messages)
+	}
+}
+
+// TestNoProgressResetOnChange verifies that the no-progress counter is reset
+// to zero when the model switches to a different tool-call pattern.  Without
+// the reset, a 2-warning sequence on pattern A followed by a 2-warning
+// sequence on pattern B would incorrectly trigger the hard stop on the fourth
+// detection.
+func TestNoProgressResetOnChange(t *testing.T) {
+	// Sequence:
+	//  Call 1: echo("a")  → first occurrence, no flag
+	//  Call 2: echo("a")  → noProgress, warnCount=1 (warn)
+	//  Call 3: echo("b")  → different pattern, warnCount resets to 0
+	//  Call 4: echo("b")  → noProgress, warnCount=1 (warn)
+	//  Call 5: final text → conversation ends cleanly
+	callNum := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callNum++
+		w.Header().Set("Content-Type", "application/json")
+		var resp string
+		switch callNum {
+		case 1, 2:
+			resp = fmt.Sprintf(
+				`{"choices":[{"message":{"role":"assistant","content":null,`+
+					`"tool_calls":[{"id":"call_%d","type":"function",`+
+					`"function":{"name":"echo","arguments":"{\"text\":\"a\"}"}}]},`+
+					`"finish_reason":"tool_calls"}]}`,
+				callNum)
+		case 3, 4:
+			resp = fmt.Sprintf(
+				`{"choices":[{"message":{"role":"assistant","content":null,`+
+					`"tool_calls":[{"id":"call_%d","type":"function",`+
+					`"function":{"name":"echo","arguments":"{\"text\":\"b\"}"}}]},`+
+					`"finish_reason":"tool_calls"}]}`,
+				callNum)
+		default:
+			resp = `{"choices":[{"message":{"role":"assistant","content":"done"}}]}`
+		}
+		w.Write([]byte(resp)) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	c := &OpenAIChatClient{
+		APIKey:     "sk-test",
+		BaseURL:    srv.URL,
+		Model:      defaultOpenAIModel,
+		httpClient: srv.Client(),
+	}
+	a := NewAIAgent(c)
+
+	got, err := a.RunConversation(context.Background(), "switch tools", 10)
+	if err != nil {
+		t.Fatalf("unexpected error (counter should have reset on pattern change): %v", err)
+	}
+	if got.Content != "done" {
+		t.Errorf("Content = %q, want %q", got.Content, "done")
+	}
+	if callNum != 5 {
+		t.Errorf("LLM call count = %d, want 5", callNum)
+	}
+}
+
+// TestNoProgressFirstOccurrenceNoWarning verifies that the first occurrence of
+// a tool-call pattern is never flagged as a loop: a single tool call followed
+// by a final text answer must produce no warning in the history sent to the
+// second LLM call.
+func TestNoProgressFirstOccurrenceNoWarning(t *testing.T) {
+	callNum := 0
+	var secondBody openAIRequest
+	var decErr error
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callNum++
+		w.Header().Set("Content-Type", "application/json")
+		if callNum == 1 {
+			w.Write([]byte( //nolint:errcheck
+				`{"choices":[{"message":{"role":"assistant","content":null,` +
+					`"tool_calls":[{"id":"call_x","type":"function",` +
+					`"function":{"name":"echo","arguments":"{\"text\":\"hi\"}"}}]},` +
+					`"finish_reason":"tool_calls"}]}`))
+			return
+		}
+		decErr = json.NewDecoder(r.Body).Decode(&secondBody)
+		w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"done"}}]}`)) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	c := &OpenAIChatClient{
+		APIKey:     "sk-test",
+		BaseURL:    srv.URL,
+		Model:      defaultOpenAIModel,
+		httpClient: srv.Client(),
+	}
+	a := NewAIAgent(c)
+
+	if _, err := a.RunConversation(context.Background(), "single echo", 5); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if decErr != nil {
+		t.Fatalf("decode error: %v", decErr)
+	}
+
+	// The history sent to the second (final) LLM call must not contain any
+	// no-progress warning — the first occurrence is never a loop.
+	for _, m := range secondBody.Messages {
+		if strings.Contains(m.Content, "no-progress") {
+			t.Errorf("unexpected no-progress warning in second call; message: %+v", m)
 		}
 	}
 }

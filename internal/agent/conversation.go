@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"strings"
 )
 
 // RunConversation runs the agent loop until the model returns a message with
@@ -34,6 +35,12 @@ func (a *AIAgent) RunConversation(ctx context.Context, userMsg string, maxIter i
 	}
 	msgs = append(msgs, Message{Role: RoleUser, Content: userMsg})
 
+	// c5: no-progress guardrail state.
+	// prevKey is the toolCallKey of the previous iteration's tool calls.
+	// warnCount counts consecutive iterations with the identical key.
+	var prevKey string
+	var warnCount int
+
 	for {
 		// Enforce budget before calling the LLM so an exhausted budget never
 		// results in an unexpected API call.
@@ -58,6 +65,26 @@ func (a *AIAgent) RunConversation(ctx context.Context, userMsg string, maxIter i
 			return resp, nil
 		}
 
+		// c5: Detect no-progress loops.
+		// A loop is a consecutive repetition of the exact same set of tool calls
+		// (same names + arguments, in order) without any change in inputs.
+		// On each detection: increment warnCount, hard-stop after
+		// maxNoProgressWarnings exceeded, otherwise inject a warning message.
+		currentKey := toolCallKey(resp.ToolCalls)
+		noProgress := prevKey != "" && currentKey == prevKey
+		prevKey = currentKey
+		if noProgress {
+			warnCount++
+			if warnCount > maxNoProgressWarnings {
+				return Message{}, fmt.Errorf(
+					"agent: no-progress loop detected: identical tool call pattern repeated %d times without change (pattern: %q)",
+					warnCount, currentKey,
+				)
+			}
+		} else {
+			warnCount = 0 // different call pattern — reset the counter
+		}
+
 		// Execute each requested tool and append results to history so the
 		// next LLM call can observe what happened.
 		for _, tc := range resp.ToolCalls {
@@ -68,8 +95,59 @@ func (a *AIAgent) RunConversation(ctx context.Context, userMsg string, maxIter i
 				ToolCallID: result.ToolCallID,
 			})
 		}
+
+		// c5: After dispatching tools, inject a user-role warning so the model
+		// can observe that it is looping and adjust its strategy. The warning is
+		// only injected when a loop is detected (noProgress == true).
+		if noProgress {
+			msgs = append(msgs, Message{Role: RoleUser, Content: noProgressMsg})
+		}
+
 		// Continue to the next LLM call with the updated history.
 	}
+}
+
+// ── c5: no-progress guardrail ─────────────────────────────────────────────────
+
+// maxNoProgressWarnings is the maximum number of consecutive identical tool-call
+// patterns that are allowed before RunConversation returns an error.
+// After this many detections a hard-stop error is returned; each earlier
+// detection causes one warning message to be injected into the conversation.
+const maxNoProgressWarnings = 3
+
+// noProgressMsg is the user-role message injected into history when a
+// no-progress loop is detected. Its content is intentionally instruction-like
+// so that the model can read it and adapt its strategy.
+const noProgressMsg = "⚠ [hermes-go] no-progress warning: the same tool call was " +
+	"repeated without new results. Consider a different approach or different arguments."
+
+// toolCallKey returns a stable string fingerprint of a slice of ToolCalls.
+// The fingerprint encodes (Name, Arguments) pairs in document order using
+// ASCII control bytes as delimiters:
+//
+//   - '\x00' separates a call's Name from its Arguments within one entry.
+//   - '\x01' separates successive tool-call entries.
+//
+// Two slices are considered "the same pattern" when their keys are equal.
+// The tool-call ID is intentionally excluded: IDs are assigned by the model
+// and change on every generation, so including them would prevent loop
+// detection even when the logical request is identical.
+//
+// An empty or nil slice returns "".
+func toolCallKey(tcs []ToolCall) string {
+	if len(tcs) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for i, tc := range tcs {
+		if i > 0 {
+			b.WriteByte('\x01') // entry separator
+		}
+		b.WriteString(tc.Name)
+		b.WriteByte('\x00') // name/args separator
+		b.WriteString(tc.Arguments)
+	}
+	return b.String()
 }
 
 // ── history integrity helpers ─────────────────────────────────────────────────
