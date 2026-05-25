@@ -1,242 +1,394 @@
-# Hermes-Go 复现计划：作者视角的学习路线与 Coding Agent 约束协议
+# Hermes-Go 演化式复现计划
 
-> 目标：通过用 Go 从零复现 Hermes Agent，**重演原作者的设计演化过程**，把每个抽象的"为什么"内化掉。配合 coding agent 协作，但严格限制其行为，确保学习主导而非生产力主导。
+> 目标：用 Go 复现 Hermes Agent 的关键架构演化，而不是照着最终形态一次性重构。每个 PR 都必须回答：这个抽象为什么现在才出现？它解决了上一个 PR 中已经真实暴露的问题吗？
+
+本路线基于 `Hermes-Wiki` 重新规划，重点参考：
+
+- [Agent Loop and Prompt Assembly](../Hermes-Wiki/concepts/agent-loop-and-prompt-assembly.md)
+- [Tool Registry](../Hermes-Wiki/concepts/tool-registry-architecture.md)、[Model Tools](../Hermes-Wiki/concepts/model-tools-dispatch.md)、[Toolsets](../Hermes-Wiki/concepts/toolsets-system.md)
+- [Prompt Builder](../Hermes-Wiki/concepts/prompt-builder-architecture.md)、[Prompt Caching](../Hermes-Wiki/concepts/prompt-caching-optimization.md)
+- [Provider Transport](../Hermes-Wiki/concepts/provider-transport-architecture.md)、[ProviderProfile](../Hermes-Wiki/concepts/provider-plugin-system.md)
+- [Context Compressor](../Hermes-Wiki/concepts/context-compressor-architecture.md)、[Large Tool Result Handling](../Hermes-Wiki/concepts/large-tool-result-handling.md)
+- [Memory](../Hermes-Wiki/concepts/memory-system-architecture.md)、[Skills](../Hermes-Wiki/concepts/skills-system-architecture.md)、[Session Search](../Hermes-Wiki/concepts/session-search-and-sessiondb.md)
+- [Security Defense](../Hermes-Wiki/concepts/security-defense-system.md)、[Tool Loop Guardrails](../Hermes-Wiki/concepts/tool-loop-guardrails.md)、[Checkpoints](../Hermes-Wiki/concepts/checkpoints-architecture.md)
+- [Parallel Tools](../Hermes-Wiki/concepts/parallel-tool-execution.md)、[MCP and Plugins](../Hermes-Wiki/concepts/mcp-and-plugins.md)、[Hooks](../Hermes-Wiki/concepts/hook-system-architecture.md)
+- [CLI](../Hermes-Wiki/concepts/cli-architecture.md)、[Profiles](../Hermes-Wiki/concepts/configuration-and-profiles.md)、[Worktree](../Hermes-Wiki/concepts/worktree-isolation.md)
+- [Web Tools](../Hermes-Wiki/concepts/web-tools-architecture.md)、[Browser Tool](../Hermes-Wiki/concepts/browser-tool-architecture.md)、[Terminal Backends](../Hermes-Wiki/concepts/terminal-backends.md)、[execute_code](../Hermes-Wiki/concepts/code-execution-sandbox.md)
+- [Multi Agent](../Hermes-Wiki/concepts/multi-agent-architecture.md)、[Goal / Ralph Loop](../Hermes-Wiki/concepts/goal-and-ralph-loop.md)、[Kanban](../Hermes-Wiki/concepts/kanban-multi-agent-board.md)
 
 ---
 
-## 0. 核心原则：演化式复现，不是自顶向下重构
+## 0. 不变量
 
-| 错误姿势 | 正确姿势 |
-|---------|---------|
-| PR #2 一口气定义所有顶层 interface（Engine、Downloader、Parser...） | 第一个 interface 只在你**真的有两个实现**之后才提取 |
-| 先搭框架，再填业务 | 先用最丑的硬编码完成端到端，再以"为什么要抽象"为驱动逐次重构 |
-| 把 Hermes 当作设计完美的目标态 | 把 Hermes 当作 N 个增量决策叠加的结果，每个 PR 模拟一个决策点 |
+这些规则优先级高于任何阶段表。
 
-**rule of three 松散版**：在出现第 2 个实现之前，**不要**提取接口；在出现第 3 个实现之前，**不要**做插件化。这条规则比任何 PR 模板都重要——它强迫你写一遍"丑代码"，再写一遍"重构 PR"，这两个 diff 之间的差就是你真正学到的东西。
+| 规则 | 含义 |
+|---|---|
+| 端到端先于抽象 | 先写硬编码、switch、具体类型；等重复和痛点出现后再重构 |
+| 两个生产实现之后才提 interface | 测试替身不算架构理由；Provider、Tool、ContextEngine、MemoryProvider 都遵守 |
+| 第三个方向之后才插件化 | Registry 可以在第二个工具后出现；插件发现必须等本地 registry 已经稳定 |
+| System prompt 会话内 byte-static | 首轮构建并缓存；当前会话内 memory/skills/context 变化不反映到 system prompt |
+| 工具结果必须可审计 | 每个 tool call 都有 role/tool_call_id/result；失败也回写结构化结果 |
+| 安全默认保守 | 未知工具串行、未知 URL 拒绝、未知 provider 不静默切换、危险内容先拦截或提示 |
+| PR 可回滚 | 写文件/patch/危险 terminal 之前要有 checkpoint；早期没有 checkpoint 时禁止危险工具 |
 
 ---
 
-## 1. 作者心法工作流：Issue → Design → PR
+## 1. Issue -> Design -> PR 工作流
 
-每一个新功能走三步，**强制分离思考阶段**。这是约束 coding agent 的核心：思考阶段不让它写代码。
+每个 PR 前先写两个文件，代码实现之前必须完成。
 
-### 1.1 需求 Issue（你自己写，禁止 agent 介入）
+```text
+docs/issues/NNNN-requirement.md
+docs/issues/NNNN-design.md
+```
+
+### 1.1 Requirement 模板
 
 ```markdown
-# [需求] <一句话需求>
+# [需求] <一句话>
 
 ## 用户场景
-- 谁会用？（CLI 用户 / 平台用户 / 子 agent）
-- 没有这个功能时会怎样？（具体描述一个 broken flow）
+- 谁会用？
+- 没有这个功能时哪个 flow 会断？
 
-## 验收标准（必须可执行）
-- [ ] 给定 X 输入，运行 `go run main.go ...`，能看到 Y 输出
-- [ ] 测试用例 `TestZZZ` 通过
+## 验收标准
+- [ ] `go test ./...` 通过
+- [ ] `go run ./cmd/hermes-go ...` 输出：<粘贴预期>
+- [ ] 至少 1 个失败路径测试
 
-## 不在本次范围内
-- 明确列出 3 条**主动放弃**的功能，避免 scope creep
+## 不在本 PR 范围
+- <主动放弃 1>
+- <主动放弃 2>
+- <主动放弃 3>
 ```
 
-### 1.2 设计 Issue（你主导，可以请 agent 提建议但不写代码）
+### 1.2 Design 模板
 
 ```markdown
-# [设计] <对应需求 issue #N>
+# [设计] <对应需求>
 
-## 我看过的 Hermes 源码位置
-- `agent/xxx.py:L123-L200`（说明你**真的读过原始实现**）
+## 我读过的 Hermes-Wiki 页面
+- `Hermes-Wiki/concepts/...md`：<本 PR 用到的事实>
 
-## 关键决策
-- 决策 1: <做了什么选择，为什么>
-- 决策 2: <做了什么选择，trade-off 是什么>
+## 当前代码里的真实痛点
+- <不是猜测，是上一版已经出现的问题>
 
-## Open question（必填，至少 1 条）
-- 我还不确定的地方：______
-  （这一条强迫你正视没想清楚的部分，而不是让 agent 替你做选择）
+## 决策
+- 决策：<做什么>
+- 原因：<为什么现在做>
+- 代价：<牺牲什么>
 
 ## Go 化映射
-- Python 的 async/await → Go 的 ______
-- Python 的 dict 自由传递 → Go 的 struct ______
-- Python 的鸭子类型 → Go 的 interface（仅在 N≥2 时引入）
+- Python dict message -> Go struct：<字段>
+- Python async/path -> Go：<选择>
+- Python ABC/interface -> Go interface：<是否已经满足两个实现>
 
-## 不引入的抽象
-- 暂不做 interface，因为现在只有 1 个实现：______
+## 暂不引入
+- <明确不做的抽象及原因>
+
+## Open Question
+- <至少 1 条。若未解决，agent 不许写代码>
 ```
 
-### 1.3 实现 PR（agent 主导写代码，但受协议约束）
+### 1.3 Coding Agent 协议
 
-见第 2 节的约束协议。
+```text
+你是 Hermes-Go 学习复现助手。每次只做一个极小 PR。
 
----
+硬性禁止：
+1. 未读 docs/issues/CURRENT.md 不写代码。
+2. 单 PR 最多改 3 个生产文件；新增生产 LOC 默认 <= 200。
+3. 不引入第三方库，除非 design issue 明确批准。
+4. 不做 unrelated cleanup。
+5. 不提前提 interface；只有 >=2 个生产实现或 design issue 明确说明例外才可以。
+6. 不吞 error，不用 panic 处理可恢复错误，不返回裸 nil。
+7. 不改 system prompt byte-static 不变量，除非 PR 主题就是 prompt/cache。
 
-## 2. Coding Agent 约束协议（直接复制粘贴给 agent）
+流程：
+1. 复述需求，一句话。
+2. 输出 diff 计划，列文件和行为，不写代码。
+3. 用户说 go 后才实现。
+4. 每个新行为有测试，至少包含失败路径。
+5. 输出验证命令和实际结果。
 
-```
-你是协助我学习 Hermes 架构的 coding 助手。我从 Python 项目用 Go 复现，每次只做一件极小的事。请严格遵守以下协议：
-
-【硬性禁止】
-1. 不允许大范围重构。本次 PR 最多修改 3 个文件，新增 LOC 不超过 200。
-2. 不允许引入新的 Go 模块/第三方库，除非我在 issue 里明确写了。
-3. 不允许在本 PR 范围外做"顺手清理"——任何与本 PR 无关的改动都必须拒绝。
-4. 不允许提取 interface，除非现在已经有 ≥2 个实现，或者我在 design issue 里明确要求。
-5. 不允许使用 panic 处理可恢复错误；不允许吞掉 error；不允许返回裸 nil。
-
-【强制流程】
-Step 1: 先读 docs/issues/CURRENT.md 里的需求和设计 issue。如果没读到，停下来问我路径。
-Step 2: 输出 diff 计划：列出要修改/新建的文件，每个文件要做什么改动（不要写代码），等我确认。
-Step 3: 我说"go"之后，才写代码。代码必须满足：
-   - 每个新函数都有对应的 _test.go 测试
-   - 不依赖 main.go 也能 go test 通过
-   - 注释只解释"为什么"，不解释"做什么"（除非是非显然的算法）
-Step 4: 提供验证步骤：
-   - go test ./... 期望输出
-   - go run main.go ... 期望终端输出（粘贴出来）
-
-【遇到歧义时】
-- 优先 ASK，不要 GUESS。一次只问一个最关键的问题。
-- 如果设计 issue 的 Open question 没解决，停下来提醒我先回答。
-
-【输出格式】
-每次回复结构必须是：
-1. "我读到的需求是: ___"（一句话复述，确保对齐）
-2. Diff 计划 / 代码 / 验证步骤（取决于当前 Step）
-3. "下一步建议"（一句话）
-不要超出。不要总结。不要展望未来 PR。
+遇到歧义：
+- 优先问一个最关键问题。
+- Design 里的 Open Question 未解决时停下。
 ```
 
 ---
 
-## 3. Hermes-Go 演化式 PR 路线
+## 2. PR 路线总览
 
-每个阶段对应 Hermes 演化史上一个关键决策点。**前 4 个阶段是必经之路**，后面可选。
-
-### Phase 0: Bootstrap（让一个壳跑起来）
-
-| PR | 内容 | 演示效果 | 学到什么 |
+| 阶段 | 主题 | 主要 Wiki 锚点 | 抽象纪律 |
 |---|---|---|---|
-| 0.1 | 项目骨架（main.go、config.yaml 加载、logger） | `go run main.go` 打印 "hermes-go v0" + 当前配置 | Go 项目结构、viper/slog 习惯 |
-| 0.2 | 定义 `Provider` 接口（**仅一个方法 `Complete(ctx, msgs) (string, error)`**） | 无可见效果 | 接口的"最小可用面"如何确定 |
-| 0.3 | `MockProvider` 实现，返回硬编码字符串 | `go run main.go --msg hi` 打印 mock 响应 | 端到端先打通，不碰真 API |
+| Phase 0 | 最小可运行 CLI + 消息结构 | CLI、Agent Loop | 无 Provider interface |
+| Phase 1 | 单轮 LLM 调用 | Provider Transport | 先具体 Anthropic，再提最小 client seam |
+| Phase 2 | 单工具循环 | Agent Loop、Model Tools | 先硬编码一个工具 |
+| Phase 3 | 第二工具后重构 Registry / Toolsets | Tool Registry、Toolsets | 第二工具出现后再 registry |
+| Phase 4 | Prompt Builder + byte-static cache | Prompt Builder、Prompt Caching | 先字符串，后 parts |
+| Phase 5 | 文件/终端能力 + 安全底座 | Security、Checkpoint、Large Results | mutating tool 必须有回滚/校验 |
+| Phase 6 | 第二 API 路径后 Transport | Provider Transport、ProviderProfile | 两条 API mode 后再 transport |
+| Phase 7 | 上下文压缩 | Context Compressor | 先截断，第二策略前再 ContextEngine |
+| Phase 8 | Memory / Session Search / Skills | Memory、Skills | 先内置，再 provider/plugin |
+| Phase 9 | Web / Browser / execute_code | Web、Browser、Sandbox | 先本地/单后端，再 provider registry |
+| Phase 10 | Profiles / Worktree / Gateway | Profiles、Worktree、Gateway | 路径隔离先于多平台 |
+| Phase 11 | Multi-agent / Goal / Kanban | Multi Agent、Goal、Kanban | delegate 先于持久 Kanban |
+| Phase 12 | MCP / Plugins / Hooks | MCP、Hooks | 核心稳定后再外部扩展 |
 
-**关键纪律**：Phase 0 结束时项目能跑、有 1 个真接口、1 个假实现。不要有第二个 provider，不要有 tool，不要有 system prompt。
+---
 
-### Phase 1: 第一次真正调用 LLM（无工具）
+## 3. Mandatory Path
 
-| PR | 内容 | 演示效果 |
+### Phase 0: Bootstrap，不做 Provider 抽象
+
+目标：让 Hermes-Go 有可运行入口、稳定消息类型和可测试的单轮假响应。
+
+| PR | 内容 | 验收 | 不做 |
+|---|---|---|---|
+| 0.1 | `go mod init`、`cmd/hermes-go`、最小 config/env 读取、版本输出 | `go run ./cmd/hermes-go --version` | 不用 viper，不建 agent 框架 |
+| 0.2 | 定义内部 `Message` / `ToolCall` / `ToolResult` struct，覆盖 JSON round-trip 测试 | `go test ./internal/agent` | 不接 API，不定义 Provider |
+| 0.3 | concrete `StaticResponder`，CLI `--msg` 打通 user -> assistant | `go run ./cmd/hermes-go --msg hi` | 不支持 system prompt，不支持工具 |
+
+完成门槛：只有具体类型和函数，没有 exported interface。
+
+### Phase 1: 第一次真实 LLM，无工具
+
+目标：先把真实 Anthropic Messages API 跑通，再抽最小 seam 给 Agent。
+
+| PR | 内容 | 验收 | 抽象纪律 |
+|---|---|---|---|
+| 1.1 | `AnthropicClient` 直接构造 request/response，只支持 user/assistant text | 真实 env 下 `--msg` 返回模型文本；无 key 时测试错误 | 不提 Transport |
+| 1.2 | `AIAgent.RunOnce(ctx, userMsg)`，内部仍只做单轮 | Agent 单元测试覆盖 success/error | 可以引入未导出的最小 `chatClient` interface，因为已有 Static + Anthropic 两个生产路径 |
+| 1.3 | 一个硬编码 system prompt 字符串，首轮插入 messages | system prompt 改变模型行为 | 不拆 PromptBuilder |
+| 1.4 | iteration budget 数据结构，但 loop 仍只跑一轮 | budget exhausted 有测试 | 不做自动继续 |
+
+Wiki 对齐点：Hermes 的 `run_conversation` 是同步循环，内部消息遵循 OpenAI role 形状；但 Go 版此阶段只复现一轮。
+
+### Phase 2: 单工具调用循环
+
+目标：复现 Hermes 最小 agent loop：LLM -> tool_call -> tool result -> LLM。
+
+| PR | 内容 | 验收 | 不做 |
+|---|---|---|---|
+| 2.1 | Anthropic tool-call wire parsing，转内部 `ToolCall` | fixture 测试 tool_use 解析 | 不执行工具 |
+| 2.2 | 硬编码 `echo` 工具，dispatch 用 switch | 模型或 fixture 调 echo 后返回 tool result | 不建 Tool interface |
+| 2.3 | `RunConversation` while loop：直到无 tool_call 或 budget 耗尽 | echo 两轮 fixture 测试 | 不并行、不 registry |
+| 2.4 | tool result 完整性：tool_call_id 配对、孤儿 tool result 清理 | orphan pair 测试 | 不压缩 |
+| 2.5 | warning-first tool loop guardrail：exact failure + idempotent no-progress | 重复失败追加 warning | 默认不 hard stop |
+
+Wiki 对齐点：`Tool Loop Guardrails` 默认 warning-first；hard stop 会损害探索能力，后续只给 cron/batch 打开。
+
+### Phase 3: 第二个工具出现后才 Registry
+
+目标：让重复 dispatch 痛点先真实出现，再提 registry/toolsets。
+
+| PR | 内容 | 验收 | 学习点 |
+|---|---|---|---|
+| 3.1 | 加 `read_file`，仍用 switch dispatch；路径限制在 cwd 下 | 读取 fixture 文件；路径逃逸失败 | 感受 switch 扩张 |
+| 3.2 | 重构 `ToolEntry` + `Registry.Register/Dispatch/GetSchemas` | echo/read_file 行为不变 | registry 是对重复的修复，不是预设框架 |
+| 3.3 | 统一工具错误 JSON：unknown、bad args、handler error | LLM 能收到结构化 error | 错误也要进入历史 |
+| 3.4 | `Toolset`：`core`、`file`、`debugging`，支持 enable/disable | disabled tool 不出现在 schema | toolset 是分组，不是权限系统 |
+| 3.5 | 动态 schema 调整：只暴露实际可用工具 | disabled/read_file schema 不泄漏 | 减少模型 hallucination |
+
+Wiki 对齐点：Hermes registry 零外部依赖，工具文件依赖 registry，上层只查询 registry；Go 版先做手动注册，自动发现等插件期再做。
+
+### Phase 4: Prompt Builder 与缓存不变量
+
+目标：把 system prompt 从字符串演化为分层构建，但保持会话内 byte-static。
+
+| PR | 内容 | 验收 | 不变量 |
+|---|---|---|---|
+| 4.1 | `PromptBuilder` parts：stable/context/volatile，但输出仍是一条 system message | parts 顺序测试 | 不做多 system messages |
+| 4.2 | SOUL.md identity 槽位；不存在用默认 identity | fixture home 测试 | SOUL 独立于项目上下文 |
+| 4.3 | 项目上下文 first-match：`.hermes.md/HERMES.md -> AGENTS.md -> CLAUDE.md -> .cursorrules` | 同目录多文件只加载一个 | 不把它们全拼进去 |
+| 4.4 | 上下文文件注入扫描：ignore instructions、secret exfil、不可见 Unicode | malicious fixture 被 BLOCKED | fail closed |
+| 4.5 | `AIAgent` 缓存 system prompt；memory/skill 变化不重建 | 同 session 两轮 hash 一致 | 压缩前不 invalidate |
+| 4.6 | 平台提示 registry：cli/cron/sms 先做 3 个 | 平台不同 prompt 不同 | 不接 gateway |
+
+Wiki 对齐点：Hermes 把稳定内容放前、易变内容放后，并且会话内缓存 `_cached_system_prompt`；这是为 prefix cache 和可复现行为服务，不只是性能优化。
+
+### Phase 5: 文件、终端与安全底座
+
+目标：在扩大工具能力前，先具备结果预算、写后校验、checkpoint 和基础安全防线。
+
+| PR | 内容 | 验收 | 安全门槛 |
+|---|---|---|---|
+| 5.1 | large result persistence：单结果超阈值写 `.hermes-go/results/`，历史只留 preview | 100KB fixture 被持久化 | `read_file` 阈值 pin 住，避免循环 |
+| 5.2 | `write_file` 只允许 cwd 内，原子写入 temp + rename | 写入成功/路径逃逸失败 | 无 checkpoint 前只允许新建/覆盖 fixture |
+| 5.3 | 写后 delta lint：JSON/YAML/Go 基础语法先做本地检查 | 坏 JSON 返回诊断 | 不接 LSP |
+| 5.4 | file-mutation verifier footer：本轮失败写入在最终响应后追加提醒 | patch 失败不会声称成功 | 只读工具不计入 |
+| 5.5 | checkpoint v0：mutating tool 前复制受影响文件到 `.hermes-go/checkpoints/` | rollback 测试恢复文件 | 先 per-project，v2 shared store 后做 |
+| 5.6 | local terminal tool，只支持非交互命令、timeout、cwd | `go test` 可调用 fixture shell | 危险命令 deny，暂不 background |
+| 5.7 | secret redaction 默认 ON：tool result 和 debug log 脱敏 | fake key 被遮蔽 | redactor 自测可禁用 |
+
+Wiki 对齐点：Hermes 的 checkpoint 对 LLM 透明，不是 tool；写文件后有 delta lint/LSP/footer 三层校验。Go 版先做最小本地版，后续再演进到 shared shadow git。
+
+### Phase 6: 第二条 API 路径后重构 Transport
+
+目标：不要一开始就做 provider 架构。等 Anthropic + OpenAI 风格两个协议都存在，再抽 transport。
+
+| PR | 内容 | 验收 | 抽象纪律 |
+|---|---|---|---|
+| 6.1 | `OpenAIChatClient` 具体实现，直接构造 chat completions request | fixture + 可选真实调用 | 暂时重复转换代码 |
+| 6.2 | 对比 Anthropic/OpenAI 差异，重构 `Transport`：ConvertMessages/ConvertTools/BuildRequest/Normalize | 两个 client 行为不变 | 现在才有两条 API mode |
+| 6.3 | `NormalizedResponse`：text/tool_calls/usage/finish_reason | 两 provider fixture 归一 | Agent loop 只看 normalized |
+| 6.4 | provider-specific role：OpenAI developer/system 切换 | gpt/codex fixture | 不散落到 agent loop |
+| 6.5 | `ProviderProfile` 数据类：auth/env/base_url/model defaults | OpenAI-compatible 第二个 provider 出现后再落地 | profile 纯数据，不持 client |
+
+Wiki 对齐点：Transport 管数据路径，ProviderProfile 管 provider 身份/auth/quirks，两者正交。不要把 token refresh、retry、stream 生命周期塞进 profile。
+
+### Phase 7: 上下文压缩
+
+目标：先做最朴素策略，再演化到结构化摘要和 engine 插件点。
+
+| PR | 内容 | 验收 | 不做 |
+|---|---|---|---|
+| 7.1 | 粗略 token estimator，含 tools/schema 成本估算 | 超阈值能预警 | 不调 LLM |
+| 7.2 | 简单 sliding truncate，保护 system + 前 N + 后 N | 消息数下降且 tool pair 完整 | 不摘要 |
+| 7.3 | Smart collapse：旧 tool result 按工具类型变一行摘要 | terminal/read_file/search_files fixture | 不丢命令和路径 |
+| 7.4 | LLM summary compressor，输出 Goal/Completed Actions/Active State 等结构 | 压缩摘要含文件/命令/错误 | 不改 system prompt |
+| 7.5 | 压缩失败 cooldown + 低收益防抖 | 连续低收益停止压缩 | 不无限重试 |
+| 7.6 | `ContextEngine` interface，仅在 sliding + compressor 两策略都存在后提取 | engine 切换测试 | 同时只允许一个 active engine |
+
+Wiki 对齐点：Hermes v3 压缩先本地去重/折叠，再 LLM 摘要；压缩不能破坏 tool_call/tool_result 配对，也不能让 system prompt 每轮漂移。
+
+---
+
+## 4. Capability Path
+
+以下阶段按兴趣推进，但顺序不要乱。每个阶段仍按 Issue -> Design -> PR。
+
+### Phase 8: Memory、Session Search、Skills
+
+| PR | 内容 | Hermes 不变量 |
 |---|---|---|
-| 1.1 | `AnthropicProvider` 实现 Provider 接口（直接调 messages API） | `go run main.go --msg "你好"` 收到真实模型回复 |
-| 1.2 | `AIAgent.RunOnce(userMsg) string` —— 单轮对话，没有 loop | 同上，但走 Agent 入口 |
-| 1.3 | 硬编码 system prompt（一个字符串常量），传给 provider | 同上，但模型行为受 system prompt 影响 |
+| 8.1 | `MemoryStore` 双文件 `MEMORY.md` / `USER.md`，`§` 分隔、字符上限 | 原子写入 + 文件锁 |
+| 8.2 | memory 内容扫描：prompt injection、secret exfil、不可见 Unicode | 写入前拦截 |
+| 8.3 | 冻结快照注入 system prompt | 当前会话写入下次才生效 |
+| 8.4 | `session_search`：SQLite FTS，先只索引 role/content/tool_name | 过去对话不进 memory |
+| 8.5 | `skills_list` / `skill_view` 渐进式披露 | system prompt 只放索引，不放全文 |
+| 8.6 | `skill_manage` create/update/archive，agent-created skills 才能自动改 | pinned 写保护后续做 |
+| 8.7 | Background review fork：只给 memory + skills toolset | 不污染主 session prompt cache |
+| 8.8 | `MemoryProvider` interface：内置 + 一个外部 provider 后再提 | 至多一个外部 provider |
 
-**陷阱预警**：很多人这里就忍不住把 system prompt 抽象成 builder。**忍住**。等 Phase 4。
+### Phase 9: Web、Browser、execute_code
 
-### Phase 2: 单工具调用循环（最小可用 agent）
-
-| PR | 内容 | 演示效果 |
+| PR | 内容 | Hermes 约束 |
 |---|---|---|
-| 2.1 | 定义 `Tool` 接口（`Name() string; Schema() ToolSchema; Execute(args) Result`） | 无 |
-| 2.2 | 硬编码一个 `EchoTool`（参数 text，返回 text） | `go run main.go --msg "echo hello"`，模型调用 EchoTool 后返回 "hello" |
-| 2.3 | Agent 主循环：while 有 tool_call → 执行 → 把 result 追加进 messages → 再调 LLM | 多轮对话能跑通 |
-| 2.4 | 消息格式规范化（user/assistant/tool 三种 role 的 struct） | 内部清晰 |
+| 9.1 | `web_search` 单后端，统一 result shape | SSRF / URL secret scan |
+| 9.2 | `web_extract` + LLM 内容压缩，小于阈值跳过 | >2M 拒绝 |
+| 9.3 | Web provider registry：search/extract/crawl capability 分开 | 至少两个 backend 后再做 |
+| 9.4 | Browser local CDP：navigate/snapshot/click/type | accessibility tree 优先 |
+| 9.5 | BrowserProvider registry：cloud provider 显式配置才启用 | 不因 Firecrawl key 自动用云浏览器 |
+| 9.6 | `execute_code` 沙箱：只允许 7 个工具，限制 calls/stdout/timeout | 中间结果不进 context |
 
-**对应 Hermes 文件**：`run_agent.py` 里的 `while api_call_count < max_iterations` 循环（参见 wiki agent-loop 章节）。
+### Phase 10: Profiles、Worktree、Gateway
 
-### Phase 3: 工具注册表（首次重构）
-
-到这里你应该已经有强烈冲动想加第二个工具。**先做注册表 PR，再加工具**——这样能真切感受"为什么需要 registry"。
-
-| PR | 内容 | 学习焦点 |
+| PR | 内容 | 关键点 |
 |---|---|---|
-| 3.1 | `Registry.Register(Tool)` / `Registry.Dispatch(name, args)` —— 但**只注册 EchoTool 一个** | Registry 在只有 1 个工具时**完全是过度设计**。这种"无意义感"本身就是学习——你会理解为什么作者要在加第二个工具之前先做这步 |
-| 3.2 | 加 `ShellTool`（执行 shell 命令） | 此时 Registry 第一次"有用"，对比 3.1 之前的硬编码 |
-| 3.3 | 加 `Toolset` 概念（一组 tool 的逻辑分组，可按名启/禁用） | Hermes 的 toolsets-system，对应 wiki toolsets-system 章节 |
+| 10.1 | `HERMES_HOME` 单一来源，所有状态路径经 resolver | 禁止 import-time 缓存路径 |
+| 10.2 | profile create/use/list，隔离 config/memory/sessions/skills | profile 切换要在启动最早发生 |
+| 10.3 | worktree mode：`.worktrees/` 创建、`.worktreeinclude` 复制/symlink | 路径遍历防护 |
+| 10.4 | slash command registry：CLI/Gateway 共享命令定义 | command 是数据，不散落 if/else |
+| 10.5 | Gateway session key 与 platform hints | 平台隔离，PII 脱敏 |
+| 10.6 | cron no-agent watchdog | 定时任务可跳过 LLM |
 
-### Phase 4: Prompt Builder 模块化
+### Phase 11: Multi-agent、Goal、Kanban
 
-到这里 system prompt 已经累积了：identity、tool-use 强制指导、平台提示。**这是第二次重构的最佳时机**。
+| PR | 内容 | 约束 |
+|---|---|---|
+| 11.1 | `delegate_task` 单子代理，skip_context_files + skip_memory | 子代理工具不超过父代理 |
+| 11.2 | 批量 delegate，最多 3 个，结果只回 summary/tool_trace | 中断传播 |
+| 11.3 | MoA：多模型回答 + 聚合器 | API 调用数明确展示 |
+| 11.4 | Background review 与 delegate 分离 | 自动触发不由 LLM 决定 |
+| 11.5 | `/goal` post-turn judge，fail-open，续推是 user message | 不改 system prompt |
+| 11.6 | `/subgoal`，要求具体证据 | 空泛完成声明不算 done |
+| 11.7 | Kanban SQLite board，dispatcher tick，worker 心跳 | 持久化跨 session/restart |
 
-| PR | 内容 |
+### Phase 12: MCP、Plugins、Hooks
+
+| PR | 内容 | 约束 |
+|---|---|---|
+| 12.1 | MCP stdio client，发现工具后注册到 registry | MCP 工具名 namespace |
+| 12.2 | MCP SSE/http + stale-pipe retry | 初始 auth 失败不无限重试 |
+| 12.3 | plugin manager：用户插件 + 项目插件 opt-in + pip entrypoint | 项目插件默认禁用 |
+| 12.4 | `pre_tool_call` / `post_tool_call` hooks | pre 可 block，错误不传播 |
+| 12.5 | `transform_tool_result` / `transform_llm_output` hooks | first non-None wins |
+| 12.6 | plugin skill namespace `plugin:skill` | 不进 system prompt 索引 |
+| 12.7 | provider/web/browser/context/memory 插件 facade | 每类遵守各自 interface 时机 |
+
+---
+
+## 5. Go 映射表
+
+| Hermes/Python | Go 映射 | 禁忌 |
+|---|---|---|
+| dict message | `struct Message { Role, Content, ToolCalls, ToolCallID }` | 不用 `map[string]any` 贯穿业务层 |
+| ABC/interface | 小 interface，只在两个生产实现后出现 | 不为“未来可能”建 interface |
+| async tool/provider | 同步主循环 + goroutine/channel 只包并发工具 | 不把整个 agent loop 变 async |
+| plugin self-register | init-time 注册可以用，但 registry 必须先稳定 | 不在 Phase 0 就做插件 |
+| prompt parts | `PromptParts{Stable, Context, Volatile []string}` | 不把 parts 发成多条 system message |
+| freeze snapshot | 首轮 clone 到 agent struct | 不从磁盘每轮重读 memory |
+| large result storage | workspace-local `.hermes-go/results` 起步 | 不把 100KB+ 结果直接塞 history |
+| checkpoint v2 | 先 per-project，再 shared bare git store | 不污染用户 `.git` |
+| provider profile | dataclass 风格 struct + hooks | 不持 client/token/stream 状态 |
+| terminal backend | interface 在 local + docker 两后端后提取 | 不一开始建 7 后端框架 |
+
+---
+
+## 6. PR Definition of Done
+
+每个 PR 必须满足：
+
+1. 有 requirement + design issue，并列出读过的 Hermes-Wiki 页面。
+2. PR 描述含“为什么现在引入/不引入这个抽象”。
+3. `go test ./...` 通过。
+4. 至少一个 CLI 或 fixture 演示。
+5. 至少一个失败路径测试。
+6. 没有 unrelated cleanup。
+7. Reflection 不超过 150 字：我原本以为 X，但 Hermes-Wiki/实现让我看到 Y。
+
+---
+
+## 7. 常见反模式
+
+| 反模式 | 立即处理 |
 |---|---|
-| 4.1 | `PromptBuilder` 把 system prompt 拆为有序的 parts（参考 wiki 列出的 13 层结构） |
-| 4.2 | SOUL.md 文件加载（identity 槽位） |
-| 4.3 | 项目上下文文件加载（`.hermes.md → AGENTS.md → CLAUDE.md` first-match-wins）|
-| 4.4 | `PLATFORM_HINTS` 注册表（cli、telegram 等） |
-| 4.5 | **缓存机制**：会话内 system prompt 只构建一次，存 `_cached_system_prompt` |
-
-**关键学习点**：缓存不是性能优化，是为了让 Anthropic 的 prefix cache 命中率最大化。这种"软件设计被外部系统的特性反推"的现象，是高级 agent 工程的标志。
-
-### Phase 5: 第二个 Provider（首次让 interface 名副其实）
-
-| PR | 内容 |
-|---|---|
-| 5.1 | `OpenAIProvider`（chat completions API） |
-| 5.2 | **此时回头重构 Provider 接口**——你会发现 Phase 0.2 定义的接口大概率不够用（reasoning content、role 切换 developer/system、tool call 格式都不同） |
-| 5.3 | Provider transport 抽象层（对应 wiki provider-transport-architecture） |
-
-### Phase 6: Context 管理（pluggable engine）
-
-对应 Hermes 2026-04-10 update：从硬编码 ContextCompressor 重构为 ContextEngine ABC。
-
-| PR | 内容 |
-|---|---|
-| 6.1 | Token counter（按 provider 不同，先简单按字符数估算） |
-| 6.2 | 阈值触发的简单截断 engine |
-| 6.3 | 定义 `ContextEngine` 接口（**只在你即将写第二个 engine 时**） |
-| 6.4 | Summarization-based compressor engine |
-
-### Phase 7+（可选，按兴趣推进）
-
-- **Phase 7**: Auxiliary Client（辅助 LLM 路由器）—— 对应 wiki auxiliary-client-architecture
-- **Phase 8**: Memory 系统（MEMORY.md 冻结快照、memory tool、provider plugin）
-- **Phase 9**: Skills + Curator 状态机
-- **Phase 10**: Multi-agent（delegate_task / mixture_of_agents）
-- **Phase 11**: 安全防御（prompt injection patterns、redaction）
-- **Phase 12**: Checkpoint v2、Fallback chain、Credential pool
+| Phase 0 定义 `Provider` / `Tool` 大接口 | 删除，退回具体类型 |
+| PromptBuilder 每轮重建 system prompt | 修复为首轮缓存 |
+| Memory 写入立刻改当前 system prompt | 改成冻结快照 |
+| 工具失败只返回普通字符串 | 改结构化 JSON error |
+| tool result 缺 tool_call_id | 不允许进入 history |
+| web/browser 没有 SSRF 和 URL secret scan | 不合并 |
+| write_file/patch 无 checkpoint 或 footer | 不合并 mutating tool |
+| provider quirks 写进 agent loop | 移到 transport/profile |
+| 插件技能自动进 system prompt | 改为显式 `plugin:skill` |
+| hard stop guardrail 默认开启 | 改回 warning-first |
 
 ---
 
-## 4. Python → Go 映射陷阱（Hermes-specific）
-
-| Python 习惯 | Go 对应 | 陷阱 |
-|---|---|---|
-| `dict` 自由传递（`message: dict`） | 强类型 struct，`Message{Role, Content, ToolCalls, Reasoning}` | 不要用 `map[string]any`，那是放弃 Go 类型系统 |
-| Anthropic SDK 的 async stream | Goroutine + channel，返回 `<-chan Chunk` | 别忘了 ctx cancel 关闭 channel |
-| Python 的鸭子类型（toolset 拿到任何 dict 都能 `.get('description')`） | interface + 编译期约束 | 在没有第二个实现前**不要**提取 interface |
-| `**kwargs` 透传 | functional options 模式（`WithXxx(...)` 函数） | 不要用 `map[string]any` 模拟 kwargs |
-| Python 的 OrderedDict LRU 缓存 | `container/list` + map，或直接用 `hashicorp/golang-lru` | Phase 4.5 会用到 |
-| Python 的运行时 monkey patch | 编译期组合 + 显式注册 | Tool registry 就是替代品 |
-
----
-
-## 5. 反模式清单（你或 agent 一旦做了就要立刻停）
-
-1. **PR 太大**：单个 PR 超过 200 行 diff 或 3 个文件 → 拆分
-2. **没有验证步骤**：PR 描述里没有"运行 X 看到 Y" → 不合格
-3. **提前抽象**：在只有 1 个实现时定义 interface → 删掉
-4. **跨 PR 改动**：本 PR 顺手改了 unrelated 文件 → revert
-5. **agent 帮你做设计决策**：你没在 design issue 里决定的东西，agent 自动选了一个方案 → 撤回，先让你决定
-6. **测试只测 happy path**：没有 error case、edge case → 补
-7. **跳过"丑代码"阶段**：Phase 3.1 你嫌 Registry 蠢就直接做 3.2 → 损失学习信号
-
----
-
-## 6. 使用建议
-
-1. **在 repo 里建 `docs/issues/` 目录**，每个 PR 之前先写两个 markdown（需求 + 设计），commit 后再开始 PR。
-2. **每个 PR 合并后写一段 reflection**（150 字以内）：我学到了什么？我原本以为是 X 但其实是 Y？这是把隐性学习显性化的关键。
-3. **每 3-5 个 PR 回头读一次 Hermes 对应源码**，对比你的实现和原作者的差异。差异的地方就是你下一轮要思考的设计 trade-off。
-4. **每次给 coding agent 任务时，把第 2 节的协议粘进去**，再附上当前 issue。不要省略。
-
----
-
-## 附录 A: 第一个 PR 的具体动作（直接执行）
+## 8. 第一个 PR 只做这些
 
 ```bash
-mkdir hermes-go && cd hermes-go
-git init
+mkdir -p hermes-go/cmd/hermes-go hermes-go/internal/agent hermes-go/docs/issues
+cd hermes-go
 go mod init github.com/<you>/hermes-go
-mkdir -p docs/issues internal/agent internal/provider internal/config cmd/hermes
 ```
 
-然后写 `docs/issues/0001-bootstrap.md`（按第 1.1 节模板）。**不要让 agent 写这个 issue**。这是你的思考产物。
+然后手写：
 
-写完后把这份文档 + issue 一起喂给 coding agent，让它做 PR 0.1。
+```text
+docs/issues/0001-requirement.md
+docs/issues/0001-design.md
+docs/issues/CURRENT.md
+```
+
+第一个 PR 的代码只允许做到：
+
+```text
+go run ./cmd/hermes-go --version
+```
+
+能打印版本即可。不要 Provider，不要 Tool，不要 PromptBuilder。
