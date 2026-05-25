@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -299,5 +300,84 @@ func TestOpenAIChatClientRespondToolResultSent(t *testing.T) {
 	}
 	if toolWire.Content != "hello" {
 		t.Errorf("messages[3].content = %q, want %q", toolWire.Content, "hello")
+	}
+}
+
+// ── Phase 2 c2: tool schema wire tests ───────────────────────────────────────
+
+// TestOpenAIChatClientSendsToolSchemas verifies that when OpenAIChatClient has
+// a tools slice set (e.g. via echoToolSpecs()), the outbound request body
+// includes a "tools" array with the correct function name and type.
+func TestOpenAIChatClientSendsToolSchemas(t *testing.T) {
+	var capturedReq openAIRequest
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&capturedReq); err != nil {
+			http.Error(w, "bad body", http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`)) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	c := &OpenAIChatClient{
+		APIKey:     "sk-test",
+		BaseURL:    srv.URL,
+		Model:      defaultOpenAIModel,
+		httpClient: srv.Client(),
+		tools:      echoToolSpecs(), // same initialisation as NewOpenAIChatClientFromEnv
+	}
+
+	if _, err := c.Respond(context.Background(), []Message{{Role: RoleUser, Content: "hi"}}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(capturedReq.Tools) != 1 {
+		t.Fatalf("tools count = %d, want 1", len(capturedReq.Tools))
+	}
+	tool := capturedReq.Tools[0]
+	if tool.Type != "function" {
+		t.Errorf("tools[0].type = %q, want %q", tool.Type, "function")
+	}
+	if tool.Function.Name != "echo" {
+		t.Errorf("tools[0].function.name = %q, want %q", tool.Function.Name, "echo")
+	}
+}
+
+// TestOpenAIChatClientNoToolsFieldWhenNil verifies that when tools is nil
+// (pre-c2 client or test without tools), the wire request omits the "tools"
+// field entirely — OpenAI treats its absence as "no tools available".
+func TestOpenAIChatClientNoToolsFieldWhenNil(t *testing.T) {
+	var capturedBody []byte
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var err error
+		capturedBody, err = io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, "read error", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`)) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	c := &OpenAIChatClient{
+		APIKey:     "sk-test",
+		BaseURL:    srv.URL,
+		Model:      defaultOpenAIModel,
+		httpClient: srv.Client(),
+		// tools: nil — intentionally not set
+	}
+
+	if _, err := c.Respond(context.Background(), []Message{{Role: RoleUser, Content: "hi"}}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if strings.Contains(string(capturedBody), `"tools"`) {
+		t.Errorf("request body should not contain 'tools' when client.tools is nil; got: %s", capturedBody)
 	}
 }

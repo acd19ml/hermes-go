@@ -77,6 +77,7 @@ func NewOpenAIChatClientFromEnv() (*OpenAIChatClient, error) {
 		httpClient: &http.Client{
 			Timeout: 60 * time.Second,
 		},
+		tools: echoToolSpecs(), // Phase 2 c2: hardcoded; Phase 3 replaces with Registry
 	}, nil
 }
 
