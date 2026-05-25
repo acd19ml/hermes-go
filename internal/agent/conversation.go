@@ -41,6 +41,12 @@ func (a *AIAgent) RunConversation(ctx context.Context, userMsg string, maxIter i
 			return Message{}, fmt.Errorf("agent: %w", err)
 		}
 
+		// Remove orphan tool results before every API call.
+		// In normal flow orphans cannot appear (DispatchTool always preserves
+		// the tool_call_id), but future features (session replay, memory
+		// injection) may introduce stale history — clean defensively.
+		msgs = dropOrphanToolResults(msgs)
+
 		resp, err := a.client.Respond(ctx, msgs)
 		if err != nil {
 			return Message{}, fmt.Errorf("agent: llm call failed: %w", err)
@@ -64,4 +70,62 @@ func (a *AIAgent) RunConversation(ctx context.Context, userMsg string, maxIter i
 		}
 		// Continue to the next LLM call with the updated history.
 	}
+}
+
+// ── history integrity helpers ─────────────────────────────────────────────────
+
+// dropOrphanToolResults returns a new slice with all orphan tool-result
+// messages removed.  A tool-result message (Role==RoleTool) is an orphan when
+// its ToolCallID does not appear in any *preceding* assistant message's
+// ToolCalls list.
+//
+// The function processes messages in document order: assistant messages
+// accumulate their tool_call IDs into a running set; each subsequent
+// RoleTool message is kept only if its ToolCallID is in that set.
+//
+// Non-tool messages (system, user, assistant) are always kept.
+// A RoleTool message with an empty ToolCallID is also dropped (malformed).
+func dropOrphanToolResults(msgs []Message) []Message {
+	validIDs := make(map[string]struct{}, 8)
+	out := make([]Message, 0, len(msgs))
+
+	for _, m := range msgs {
+		if m.Role == RoleAssistant {
+			for _, tc := range m.ToolCalls {
+				validIDs[tc.ID] = struct{}{}
+			}
+		}
+		if m.Role == RoleTool {
+			if _, ok := validIDs[m.ToolCallID]; !ok {
+				continue // orphan (includes empty ToolCallID — malformed)
+			}
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
+// validateToolPairing returns an error if any tool-result message in msgs has
+// a ToolCallID not present in any preceding assistant message's ToolCalls.
+// It mirrors the logic of dropOrphanToolResults but reports rather than
+// silently removes, making it useful for assertions and debugging.
+func validateToolPairing(msgs []Message) error {
+	validIDs := make(map[string]struct{}, 8)
+
+	for _, m := range msgs {
+		if m.Role == RoleAssistant {
+			for _, tc := range m.ToolCalls {
+				validIDs[tc.ID] = struct{}{}
+			}
+		}
+		if m.Role == RoleTool {
+			if _, ok := validIDs[m.ToolCallID]; !ok {
+				return fmt.Errorf(
+					"orphan tool result: tool_call_id %q has no matching preceding assistant tool_call",
+					m.ToolCallID,
+				)
+			}
+		}
+	}
+	return nil
 }

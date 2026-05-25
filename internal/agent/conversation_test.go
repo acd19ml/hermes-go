@@ -217,3 +217,188 @@ func TestRunConversationBudgetExhausted(t *testing.T) {
 		t.Errorf("error = %q, want it to mention 'budget exhausted'", err.Error())
 	}
 }
+
+// ── Phase 2 c4: tool-result integrity ─────────────────────────────────────────
+
+// TestDropOrphanToolResultsNoOrphans verifies that a well-formed history is
+// returned unchanged: valid tool results (ToolCallID present in a preceding
+// assistant message) must survive the cleanup.
+func TestDropOrphanToolResultsNoOrphans(t *testing.T) {
+	msgs := []Message{
+		{Role: RoleSystem, Content: "sys"},
+		{Role: RoleUser, Content: "u"},
+		{Role: RoleAssistant, ToolCalls: []ToolCall{{ID: "call_1", Name: "echo"}}},
+		{Role: RoleTool, ToolCallID: "call_1", Content: "result"},
+	}
+	got := dropOrphanToolResults(msgs)
+	if len(got) != len(msgs) {
+		t.Errorf("len(got) = %d, want %d (no orphans should be removed)", len(got), len(msgs))
+	}
+}
+
+// TestDropOrphanToolResultsWithOrphan verifies that a tool-result whose
+// ToolCallID does not appear in any preceding assistant message is removed.
+func TestDropOrphanToolResultsWithOrphan(t *testing.T) {
+	msgs := []Message{
+		{Role: RoleSystem, Content: "sys"},
+		{Role: RoleUser, Content: "u"},
+		{Role: RoleAssistant, ToolCalls: []ToolCall{{ID: "call_1", Name: "echo"}}},
+		{Role: RoleTool, ToolCallID: "call_1", Content: "ok"},
+		{Role: RoleTool, ToolCallID: "call_STALE", Content: "??"},  // orphan
+	}
+	got := dropOrphanToolResults(msgs)
+	if len(got) != 4 {
+		t.Fatalf("len(got) = %d, want 4 (orphan removed)", len(got))
+	}
+	for _, m := range got {
+		if m.Role == RoleTool && m.ToolCallID == "call_STALE" {
+			t.Error("orphan tool result still present after dropOrphanToolResults")
+		}
+	}
+}
+
+// TestDropOrphanToolResultsEmptyToolCallID verifies that a tool-result with an
+// empty ToolCallID (malformed) is treated as an orphan and dropped.
+func TestDropOrphanToolResultsEmptyToolCallID(t *testing.T) {
+	msgs := []Message{
+		{Role: RoleUser, Content: "u"},
+		{Role: RoleTool, ToolCallID: "", Content: "malformed"}, // no matching assistant
+	}
+	got := dropOrphanToolResults(msgs)
+	if len(got) != 1 {
+		t.Fatalf("len(got) = %d, want 1 (empty-ID tool result dropped)", len(got))
+	}
+	if got[0].Role != RoleUser {
+		t.Errorf("got[0].role = %q, want user", got[0].Role)
+	}
+}
+
+// TestDropOrphanToolResultsMultipleCalls verifies that tool results from
+// multiple sequential assistant messages are all retained when valid.
+func TestDropOrphanToolResultsMultipleCalls(t *testing.T) {
+	msgs := []Message{
+		{Role: RoleUser, Content: "u"},
+		// first assistant turn
+		{Role: RoleAssistant, ToolCalls: []ToolCall{{ID: "c1"}}},
+		{Role: RoleTool, ToolCallID: "c1", Content: "r1"},
+		// second assistant turn
+		{Role: RoleAssistant, ToolCalls: []ToolCall{{ID: "c2"}}},
+		{Role: RoleTool, ToolCallID: "c2", Content: "r2"},
+		// orphan injected between them
+		{Role: RoleTool, ToolCallID: "GHOST", Content: "boo"},
+	}
+	got := dropOrphanToolResults(msgs)
+	if len(got) != 5 {
+		t.Fatalf("len(got) = %d, want 5 (one orphan removed)", len(got))
+	}
+}
+
+// TestValidateToolPairingOK verifies that a valid history (all tool results
+// have a matching preceding assistant tool_call) returns nil.
+func TestValidateToolPairingOK(t *testing.T) {
+	msgs := []Message{
+		{Role: RoleAssistant, ToolCalls: []ToolCall{{ID: "call_a"}}},
+		{Role: RoleTool, ToolCallID: "call_a", Content: "ok"},
+	}
+	if err := validateToolPairing(msgs); err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+// TestValidateToolPairingOrphan verifies that an orphan tool result causes
+// validateToolPairing to return a non-nil error mentioning the offending ID.
+func TestValidateToolPairingOrphan(t *testing.T) {
+	msgs := []Message{
+		{Role: RoleAssistant, ToolCalls: []ToolCall{{ID: "call_a"}}},
+		{Role: RoleTool, ToolCallID: "call_a", Content: "ok"},
+		{Role: RoleTool, ToolCallID: "call_ORPHAN", Content: "??"},
+	}
+	err := validateToolPairing(msgs)
+	if err == nil {
+		t.Fatal("expected error for orphan tool result, got nil")
+	}
+	if !strings.Contains(err.Error(), "call_ORPHAN") {
+		t.Errorf("error %q should mention the orphan ID", err.Error())
+	}
+}
+
+// TestValidateToolPairingEmpty verifies that an empty or tool-free history
+// is considered valid (no orphans to report).
+func TestValidateToolPairingEmpty(t *testing.T) {
+	cases := [][]Message{
+		nil,
+		{},
+		{{Role: RoleSystem, Content: "sys"}, {Role: RoleUser, Content: "u"}},
+	}
+	for _, msgs := range cases {
+		if err := validateToolPairing(msgs); err != nil {
+			t.Errorf("validateToolPairing(%v) = %v, want nil", msgs, err)
+		}
+	}
+}
+
+// TestRunConversationOrphanCleaned verifies that the msgs passed to each LLM
+// call inside RunConversation contain no orphan tool results.  The httptest
+// server runs validateToolPairing on the decoded request and returns HTTP 400
+// on failure, which causes RunConversation to return an error — making the
+// test fail if orphans reach the API.
+func TestRunConversationOrphanCleaned(t *testing.T) {
+	const toolCallID = "call_clean_01"
+
+	callNum := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callNum++
+
+		var req openAIRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "decode error", http.StatusBadRequest)
+			return
+		}
+
+		// Reconstruct internal Messages from the wire format so we can run
+		// validateToolPairing (which operates on []Message, not []openAIMessage).
+		internal := make([]Message, len(req.Messages))
+		for i, wm := range req.Messages {
+			internal[i] = Message{Role: wm.Role, ToolCallID: wm.ToolCallID}
+			for _, wtc := range wm.ToolCalls {
+				internal[i].ToolCalls = append(internal[i].ToolCalls, ToolCall{ID: wtc.ID})
+			}
+		}
+		if err := validateToolPairing(internal); err != nil {
+			// Orphan found — fail the HTTP call so RunConversation returns an error.
+			http.Error(w, "orphan: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		switch callNum {
+		case 1:
+			// First call: model requests echo tool.
+			w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":null,` + //nolint:errcheck
+				`"tool_calls":[{"id":"` + toolCallID + `","type":"function",` +
+				`"function":{"name":"echo","arguments":"{\"text\":\"ok\"}"}}]},` +
+				`"finish_reason":"tool_calls"}]}`))
+		default:
+			// Second call: final answer.
+			w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"done"}}]}`)) //nolint:errcheck
+		}
+	}))
+	defer srv.Close()
+
+	c := &OpenAIChatClient{
+		APIKey:     "sk-test",
+		BaseURL:    srv.URL,
+		Model:      defaultOpenAIModel,
+		httpClient: srv.Client(),
+	}
+	a := NewAIAgent(c)
+
+	_, err := a.RunConversation(context.Background(), "clean history test", 5)
+	if err != nil {
+		t.Fatalf("RunConversation failed — possibly orphan tool result in request: %v", err)
+	}
+	if callNum != 2 {
+		t.Errorf("LLM call count = %d, want 2", callNum)
+	}
+}
