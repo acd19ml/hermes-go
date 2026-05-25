@@ -1,0 +1,15 @@
+# Build output
+/bin/
+*.exe
+
+# Runtime workspace
+.hermes-go/
+
+# Local-only project files
+.github/labels.yml
+scripts/
+docs/issues/
+
+# Go toolchain
+*.test
+*.out
