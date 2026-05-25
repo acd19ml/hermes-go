@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+
+	"github.com/acd19ml/hermes-go/internal/agent"
 )
 
 const version = "v0.0.1"
@@ -18,6 +20,7 @@ func run(args []string, stdout io.Writer, stderr io.Writer) int {
 	flags.SetOutput(stderr)
 
 	showVersion := flags.Bool("version", false, "print version and exit")
+	msg := flags.String("msg", "", "send a message and print the response")
 
 	if err := flags.Parse(args); err != nil {
 		return 2
@@ -28,10 +31,35 @@ func run(args []string, stdout io.Writer, stderr io.Writer) int {
 		return 2
 	}
 
+	// --msg takes priority over --version and the no-args version banner.
+	if flags.Lookup("msg").Value.String() != "" || isFlagSet(flags, "msg") {
+		in := agent.Message{Role: agent.RoleUser, Content: *msg}
+		resp, err := agent.StaticResponder{}.Respond(in)
+		if err != nil {
+			fmt.Fprintf(stderr, "error: %v\n", err)
+			return 1
+		}
+		fmt.Fprintln(stdout, resp.Content)
+		return 0
+	}
+
 	if *showVersion || len(args) == 0 {
 		fmt.Fprintf(stdout, "hermes-go %s\n", version)
 		return 0
 	}
 
 	return 0
+}
+
+// isFlagSet reports whether the named flag was explicitly provided in args.
+// flag.Value.String() returns the default for unset flags, so it cannot
+// distinguish between --msg "" (explicitly empty) and a missing --msg.
+func isFlagSet(fs *flag.FlagSet, name string) bool {
+	found := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			found = true
+		}
+	})
+	return found
 }
