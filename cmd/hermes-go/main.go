@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"io"
@@ -33,8 +34,13 @@ func run(args []string, stdout io.Writer, stderr io.Writer) int {
 
 	// --msg takes priority over --version and the no-args version banner.
 	if flags.Lookup("msg").Value.String() != "" || isFlagSet(flags, "msg") {
-		in := agent.Message{Role: agent.RoleUser, Content: *msg}
-		resp, err := agent.StaticResponder{}.Respond(in)
+		client, err := agent.NewOpenAIChatClientFromEnv()
+		if err != nil {
+			fmt.Fprintf(stderr, "error: %v\n", err)
+			return 1
+		}
+		a := agent.NewAIAgent(client)
+		resp, err := a.RunOnce(context.Background(), *msg)
 		if err != nil {
 			fmt.Fprintf(stderr, "error: %v\n", err)
 			return 1
