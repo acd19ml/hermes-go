@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"os"
 	"time"
+
+	"github.com/acd19ml/hermes-go/internal/config"
 )
 
 const (
@@ -21,10 +23,11 @@ const (
 // Internal format is already OpenAI-style, so the wire conversion is a
 // direct mapping: Message → openAIMessage, no field renaming required.
 //
-// Environment variables:
-//   - OPENAI_API_KEY   (required) — secret key; construction fails if absent.
-//   - OPENAI_BASE_URL  (optional) — override base URL for OpenAI-compatible endpoints.
-//   - OPENAI_MODEL     (optional) — override model name; default gpt-4o-mini.
+// Resolution order for each field (first non-empty wins):
+//
+//	APIKey  : OPENAI_API_KEY env → ~/.hermes-go/config.json api_key
+//	BaseURL : OPENAI_BASE_URL env → config.json base_url → https://api.openai.com/v1
+//	Model   : OPENAI_MODEL env → config.json model → gpt-4o-mini
 type OpenAIChatClient struct {
 	APIKey     string
 	BaseURL    string
@@ -32,24 +35,34 @@ type OpenAIChatClient struct {
 	httpClient *http.Client
 }
 
-// NewOpenAIChatClientFromEnv constructs an OpenAIChatClient from environment
-// variables. Returns an error (not a panic) when OPENAI_API_KEY is absent or
-// empty, so callers can surface a clear diagnostic.
+// NewOpenAIChatClientFromEnv constructs an OpenAIChatClient using the
+// resolution order described on OpenAIChatClient:
+//
+//  1. Environment variables (OPENAI_API_KEY, OPENAI_BASE_URL, OPENAI_MODEL).
+//  2. ~/.hermes-go/config.json written by --configure wizard.
+//  3. Built-in defaults (base URL and model only).
+//
+// Returns an error if no API key is found in either source.
 func NewOpenAIChatClientFromEnv() (*OpenAIChatClient, error) {
-	key := os.Getenv("OPENAI_API_KEY")
+	// Load config file as fallback (errors silently ignored — file may not exist).
+	// HERMES_CONFIG env overrides the path; tests set it to /dev/null to isolate.
+	var cfg config.Config
+	cfgPath := os.Getenv("HERMES_CONFIG")
+	if cfgPath == "" {
+		cfgPath, _ = config.DefaultPath()
+	}
+	if cfgPath != "" {
+		cfg, _ = config.Load(cfgPath)
+	}
+
+	key := firstNonEmpty(os.Getenv("OPENAI_API_KEY"), cfg.APIKey)
 	if key == "" {
-		return nil, fmt.Errorf("OPENAI_API_KEY is not set; export it before running hermes-go")
+		return nil, fmt.Errorf(
+			"no API key found — set OPENAI_API_KEY or run: hermes-go --configure")
 	}
 
-	baseURL := os.Getenv("OPENAI_BASE_URL")
-	if baseURL == "" {
-		baseURL = defaultOpenAIBaseURL
-	}
-
-	model := os.Getenv("OPENAI_MODEL")
-	if model == "" {
-		model = defaultOpenAIModel
-	}
+	baseURL := firstNonEmpty(os.Getenv("OPENAI_BASE_URL"), cfg.BaseURL, defaultOpenAIBaseURL)
+	model := firstNonEmpty(os.Getenv("OPENAI_MODEL"), cfg.Model, defaultOpenAIModel)
 
 	return &OpenAIChatClient{
 		APIKey:  key,
@@ -59,6 +72,16 @@ func NewOpenAIChatClientFromEnv() (*OpenAIChatClient, error) {
 			Timeout: 60 * time.Second,
 		},
 	}, nil
+}
+
+// firstNonEmpty returns the first non-empty string from vals.
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // ── unexported wire types ────────────────────────────────────────────────────

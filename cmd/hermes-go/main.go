@@ -22,6 +22,7 @@ func run(args []string, stdout io.Writer, stderr io.Writer) int {
 
 	showVersion := flags.Bool("version", false, "print version and exit")
 	msg := flags.String("msg", "", "send a message and print the response")
+	configure := flags.Bool("configure", false, "run the interactive configuration wizard")
 
 	if err := flags.Parse(args); err != nil {
 		return 2
@@ -30,6 +31,11 @@ func run(args []string, stdout io.Writer, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "unexpected argument: %s\n", flags.Arg(0))
 		flags.Usage()
 		return 2
+	}
+
+	// --configure: interactive wizard (reads stdin directly).
+	if *configure {
+		return runConfigure(stdout, stderr)
 	}
 
 	// --msg takes priority over --version and the no-args version banner.

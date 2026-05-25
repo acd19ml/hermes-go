@@ -60,6 +60,7 @@ func TestRunUnknownFlagReturnsError(t *testing.T) {
 
 func TestRunMsgNoAPIKey(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "")
+	t.Setenv("HERMES_CONFIG", "/dev/null") // prevent falling back to real config file
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer

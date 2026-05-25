@@ -13,6 +13,7 @@ import (
 
 func TestNewOpenAIChatClientFromEnvNoKey(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "")
+	t.Setenv("HERMES_CONFIG", "/dev/null") // prevent falling back to real config file
 	_, err := NewOpenAIChatClientFromEnv()
 	if err == nil {
 		t.Fatal("expected error when OPENAI_API_KEY is empty, got nil")
@@ -26,6 +27,7 @@ func TestNewOpenAIChatClientFromEnvDefaults(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "sk-test")
 	t.Setenv("OPENAI_BASE_URL", "")
 	t.Setenv("OPENAI_MODEL", "")
+	t.Setenv("HERMES_CONFIG", "/dev/null") // ensure built-in defaults are used, not config file
 
 	c, err := NewOpenAIChatClientFromEnv()
 	if err != nil {
