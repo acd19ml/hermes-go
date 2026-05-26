@@ -10,7 +10,6 @@ import (
 )
 
 // getCwd returns the process working directory, falling back to "." on error.
-// DispatchTool calls this so tool handlers always receive a usable cwd string.
 func getCwd() string {
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -19,11 +18,26 @@ func getCwd() string {
 	return cwd
 }
 
-// echoToolSpecs returns the OpenAI wire schemas for the echo tool.
+// toolError returns a JSON-encoded error body with a human message and a
+// machine-readable code.  All tool error Content fields use this format so the
+// model can parse both fields and decide how to respond.
 //
-// Still used by OpenAIChatClient.tools until Phase 3 c5 replaces the field
-// with enabledToolsets + globalRegistry.GetSchemas().  Kept here alongside
-// echoEntry() to keep schema and handler co-located; c5 will delete it.
+// Format: {"error":"<msg>","code":"<code>"}
+// Codes:  unknown_tool | bad_arguments | path_escape | execution_error
+func toolError(code, msg string) string {
+	return fmt.Sprintf(`{"error":%s,"code":%s}`,
+		jsonString(msg), jsonString(code))
+}
+
+// jsonString returns a JSON-encoded string literal for s, using
+// json.Marshal to handle escaping correctly.
+func jsonString(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b)
+}
+
+// echoToolSpecs returns the OpenAI wire schemas for the echo tool.
+// Still used by OpenAIChatClient.tools until Phase 3 c5 replaces it.
 func echoToolSpecs() []openAIToolSpec {
 	params := json.RawMessage(`{` +
 		`"type":"object",` +
@@ -41,19 +55,12 @@ func echoToolSpecs() []openAIToolSpec {
 }
 
 // DispatchTool delegates to globalRegistry.Dispatch.
-//
-// The switch introduced in Phase 2 has been replaced now that two production
-// tools exist and the Registry abstraction is justified.  All tool routing
-// happens inside Registry.Dispatch; adding a new tool only requires a new
-// ToolEntry registered in init() — DispatchTool never needs to change again.
 func DispatchTool(ctx context.Context, tc ToolCall) ToolResult {
 	return globalRegistry.Dispatch(ctx, tc)
 }
 
 // ── echo tool ─────────────────────────────────────────────────────────────────
 
-// echoEntry returns the ToolEntry for the echo tool, bundling its schema and
-// handler into one value so they are always in sync.
 func echoEntry() ToolEntry {
 	params := json.RawMessage(`{` +
 		`"type":"object",` +
@@ -70,8 +77,6 @@ func echoEntry() ToolEntry {
 	}
 }
 
-// echoTool implements the echo tool: parses the "text" argument from tc and
-// returns it unchanged.  Arguments must be a JSON object {"text":"<string>"}.
 func echoTool(tc ToolCall) ToolResult {
 	var args struct {
 		Text string `json:"text"`
@@ -80,22 +85,19 @@ func echoTool(tc ToolCall) ToolResult {
 		return ToolResult{
 			ToolCallID: tc.ID,
 			Name:       "echo",
-			Content:    fmt.Sprintf(`{"error":"echo: bad arguments: %v"}`, err),
+			Content:    toolError("bad_arguments", "echo: bad arguments: "+err.Error()),
 			IsError:    true,
 		}
 	}
 	return ToolResult{
 		ToolCallID: tc.ID,
-		Name:       "echo", // use literal, not tc.Name, to guard against case drift
+		Name:       "echo",
 		Content:    args.Text,
 	}
 }
 
 // ── read_file tool ────────────────────────────────────────────────────────────
 
-// readFileEntry returns the ToolEntry for the read_file tool, bundling its
-// schema and handler.  The handler closure calls getCwd() at invocation time
-// (not at registration time) so the working directory is always current.
 func readFileEntry() ToolEntry {
 	params := json.RawMessage(`{` +
 		`"type":"object",` +
@@ -112,15 +114,6 @@ func readFileEntry() ToolEntry {
 	}
 }
 
-// readFileTool implements the read_file tool.
-//
-// cwd is injected so the function is testable without touching os.Getwd;
-// production callers pass getCwd() via the readFileEntry handler closure.
-//
-// Path safety: the resolved absolute path must remain inside cwd.
-// Any path that escapes (e.g. "../secret") is rejected with IsError=true.
-//
-// Arguments must be a JSON object {"path":"<relative-path>"}.
 func readFileTool(tc ToolCall, cwd string) ToolResult {
 	var args struct {
 		Path string `json:"path"`
@@ -129,7 +122,7 @@ func readFileTool(tc ToolCall, cwd string) ToolResult {
 		return ToolResult{
 			ToolCallID: tc.ID,
 			Name:       "read_file",
-			Content:    fmt.Sprintf(`{"error":"read_file: bad arguments: %v"}`, err),
+			Content:    toolError("bad_arguments", "read_file: bad arguments: "+err.Error()),
 			IsError:    true,
 		}
 	}
@@ -137,18 +130,17 @@ func readFileTool(tc ToolCall, cwd string) ToolResult {
 		return ToolResult{
 			ToolCallID: tc.ID,
 			Name:       "read_file",
-			Content:    `{"error":"read_file: path must not be empty"}`,
+			Content:    toolError("bad_arguments", "read_file: path must not be empty"),
 			IsError:    true,
 		}
 	}
 
-	// Resolve to absolute path and verify it stays within cwd.
 	abs, err := filepath.Abs(filepath.Join(cwd, args.Path))
 	if err != nil {
 		return ToolResult{
 			ToolCallID: tc.ID,
 			Name:       "read_file",
-			Content:    fmt.Sprintf(`{"error":"read_file: cannot resolve path: %v"}`, err),
+			Content:    toolError("execution_error", "read_file: cannot resolve path: "+err.Error()),
 			IsError:    true,
 		}
 	}
@@ -157,7 +149,7 @@ func readFileTool(tc ToolCall, cwd string) ToolResult {
 		return ToolResult{
 			ToolCallID: tc.ID,
 			Name:       "read_file",
-			Content:    `{"error":"read_file: path escapes working directory"}`,
+			Content:    toolError("path_escape", "read_file: path escapes working directory"),
 			IsError:    true,
 		}
 	}
@@ -167,7 +159,7 @@ func readFileTool(tc ToolCall, cwd string) ToolResult {
 		return ToolResult{
 			ToolCallID: tc.ID,
 			Name:       "read_file",
-			Content:    fmt.Sprintf(`{"error":"read_file: %v"}`, err),
+			Content:    toolError("execution_error", "read_file: "+err.Error()),
 			IsError:    true,
 		}
 	}

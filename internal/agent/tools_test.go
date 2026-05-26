@@ -4,7 +4,6 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
@@ -43,8 +42,7 @@ func TestDispatchToolEchoEmptyText(t *testing.T) {
 }
 
 // TestDispatchToolEchoBadArgs covers the branch where Arguments is not valid
-// JSON. The result must have IsError=true and a non-empty Content that
-// mentions the parse failure — so the model can read the error and retry.
+// JSON. The result must have IsError=true with code "bad_arguments".
 func TestDispatchToolEchoBadArgs(t *testing.T) {
 	tc := ToolCall{ID: "call_3", Name: "echo", Arguments: `not-json`}
 	got := DispatchTool(context.Background(), tc)
@@ -58,13 +56,13 @@ func TestDispatchToolEchoBadArgs(t *testing.T) {
 	if got.Name != "echo" {
 		t.Errorf("Name = %q, want %q", got.Name, "echo")
 	}
-	if !strings.Contains(got.Content, "error") {
-		t.Errorf("Content %q should contain 'error'", got.Content)
+	if c := errorCode(got.Content); c != "bad_arguments" {
+		t.Errorf("code = %q, want %q; content: %s", c, "bad_arguments", got.Content)
 	}
 }
 
-// TestDispatchToolUnknown covers the default switch branch: any tool name not
-// registered returns IsError=true and mentions the tool name in Content.
+// TestDispatchToolUnknown covers the default registry path: any tool name not
+// registered returns IsError=true with code "unknown_tool".
 func TestDispatchToolUnknown(t *testing.T) {
 	tc := ToolCall{ID: "call_4", Name: "nonexistent_tool", Arguments: `{}`}
 	got := DispatchTool(context.Background(), tc)
@@ -75,8 +73,8 @@ func TestDispatchToolUnknown(t *testing.T) {
 	if got.ToolCallID != "call_4" {
 		t.Errorf("ToolCallID = %q, want %q", got.ToolCallID, "call_4")
 	}
-	if !strings.Contains(got.Content, "nonexistent_tool") {
-		t.Errorf("Content %q should mention the unknown tool name", got.Content)
+	if c := errorCode(got.Content); c != "unknown_tool" {
+		t.Errorf("code = %q, want %q; content: %s", c, "unknown_tool", got.Content)
 	}
 }
 
@@ -132,7 +130,7 @@ func TestReadFileToolSuccess(t *testing.T) {
 }
 
 // TestReadFileToolPathEscape verifies that paths escaping the cwd (e.g. "../secret")
-// are rejected with IsError=true.
+// are rejected with IsError=true and code "path_escape".
 func TestReadFileToolPathEscape(t *testing.T) {
 	dir := t.TempDir()
 	cases := []string{"../secret", "../../etc/passwd", "subdir/../../outside"}
@@ -143,15 +141,15 @@ func TestReadFileToolPathEscape(t *testing.T) {
 			if !got.IsError {
 				t.Errorf("path %q: IsError = false, want true (path escapes cwd)", p)
 			}
-			if !strings.Contains(got.Content, "error") {
-				t.Errorf("path %q: Content %q should contain 'error'", p, got.Content)
+			if c := errorCode(got.Content); c != "path_escape" {
+				t.Errorf("path %q: code = %q, want %q; content: %s", p, c, "path_escape", got.Content)
 			}
 		})
 	}
 }
 
 // TestReadFileToolBadArgs verifies that non-JSON arguments return IsError=true
-// with an error message the model can read.
+// with code "bad_arguments".
 func TestReadFileToolBadArgs(t *testing.T) {
 	dir := t.TempDir()
 	tc := ToolCall{ID: "rf_bad", Name: "read_file", Arguments: `not-json`}
@@ -163,12 +161,13 @@ func TestReadFileToolBadArgs(t *testing.T) {
 	if got.ToolCallID != "rf_bad" {
 		t.Errorf("ToolCallID = %q, want %q", got.ToolCallID, "rf_bad")
 	}
-	if !strings.Contains(got.Content, "error") {
-		t.Errorf("Content %q should contain 'error'", got.Content)
+	if c := errorCode(got.Content); c != "bad_arguments" {
+		t.Errorf("code = %q, want %q; content: %s", c, "bad_arguments", got.Content)
 	}
 }
 
-// TestReadFileToolMissing verifies that a non-existent file returns IsError=true.
+// TestReadFileToolMissing verifies that a non-existent file returns IsError=true
+// with code "execution_error".
 func TestReadFileToolMissing(t *testing.T) {
 	dir := t.TempDir()
 	tc := ToolCall{ID: "rf_miss", Name: "read_file", Arguments: `{"path":"does_not_exist.txt"}`}
@@ -180,8 +179,8 @@ func TestReadFileToolMissing(t *testing.T) {
 	if got.ToolCallID != "rf_miss" {
 		t.Errorf("ToolCallID = %q, want %q", got.ToolCallID, "rf_miss")
 	}
-	if !strings.Contains(got.Content, "error") {
-		t.Errorf("Content %q should contain 'error'", got.Content)
+	if c := errorCode(got.Content); c != "execution_error" {
+		t.Errorf("code = %q, want %q; content: %s", c, "execution_error", got.Content)
 	}
 }
 

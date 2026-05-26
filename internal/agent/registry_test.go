@@ -5,9 +5,18 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 )
+
+// errorCode parses the "code" field from a toolError JSON body.
+// Returns "" if content is not valid JSON or the field is absent.
+func errorCode(content string) string {
+	var body struct {
+		Code string `json:"code"`
+	}
+	_ = json.Unmarshal([]byte(content), &body)
+	return body.Code
+}
 
 // ── Registry.Register ─────────────────────────────────────────────────────────
 
@@ -85,8 +94,8 @@ func TestRegistryDispatchUnknown(t *testing.T) {
 	if !got.IsError {
 		t.Errorf("IsError = false, want true for unknown tool")
 	}
-	if !strings.Contains(got.Content, "no_such_tool") {
-		t.Errorf("Content %q should contain the tool name", got.Content)
+	if c := errorCode(got.Content); c != "unknown_tool" {
+		t.Errorf("code = %q, want %q; content: %s", c, "unknown_tool", got.Content)
 	}
 	if got.ToolCallID != "reg_unk" {
 		t.Errorf("ToolCallID = %q, want %q", got.ToolCallID, "reg_unk")

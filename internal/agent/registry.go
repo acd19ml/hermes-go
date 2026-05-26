@@ -66,7 +66,7 @@ func (r *Registry) Dispatch(ctx context.Context, tc ToolCall) ToolResult {
 		return ToolResult{
 			ToolCallID: tc.ID,
 			Name:       tc.Name,
-			Content:    fmt.Sprintf(`{"error":"unknown tool %q"}`, tc.Name),
+			Content:    toolError("unknown_tool", "unknown tool: "+tc.Name),
 			IsError:    true,
 		}
 	}
