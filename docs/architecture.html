@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Hermes-Go — Phase 0–2 Architecture</title>
+  <title>Hermes-Go — Phase 0–3 Architecture</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     body {
@@ -85,8 +85,9 @@
       <span class="badge done-b">Phase 0 ✅</span>
       <span class="badge done-b">Phase 1 ✅</span>
       <span class="badge done-b">Phase 2 ✅</span>
+      <span class="badge done-b">Phase 3 ✅</span>
     </h1>
-    <p class="subtitle">Go 复现 Hermes Agent · v0.0.1 · 2026-05 · 51 tests · 人工验证 ✓</p>
+    <p class="subtitle">Go 复现 Hermes Agent · v0.0.1 · 2026-05 · 79 tests · 人工验证 ✓</p>
   </div>
 
   <!-- ── 1. RunConversation 主循环流程图 ────────────────────────────────── -->
@@ -234,24 +235,44 @@
 
   <!-- ── 2. Tool Dispatch ────────────────────────────────────────────────── -->
   <div class="section">
-    <div class="section-title">工具派发 DispatchTool — internal/agent/tools.go（Phase 2 c2）</div>
+    <div class="section-title">工具派发 — internal/agent/tools.go · registry.go（Phase 3）</div>
+
+    <!-- Registry flow -->
+    <div class="card t-agent" style="margin-bottom:10px;">
+      <h2>Registry 派发流程</h2>
+      <div class="fstep"><div class="n">1</div><div><code>DispatchTool(ctx, tc)</code> → <code>globalRegistry.Dispatch(ctx, tc)</code></div></div>
+      <div class="fstep"><div class="n">2</div><div>Registry 按 <code>tc.Name</code> 查 <code>map[string]ToolEntry</code></div></div>
+      <div class="fstep"><div class="n">3</div><div>找到 → 调 <code>entry.Handler(ctx, tc)</code> &nbsp;|&nbsp; 找不到 → <code>{"error":"...","code":"unknown_tool"}</code></div></div>
+      <div class="note">工具错误统一格式 <code>{"error":"...","code":"..."}</code>；code 枚举：<code>unknown_tool · bad_arguments · path_escape · execution_error</code></div>
+    </div>
+
     <div class="grid g2">
-
       <div class="card t-agent">
-        <h2>路径 A · echo 工具</h2>
-        <div class="fstep"><div class="n">1</div><div>tc.Name = <code>"echo"</code> → switch 命中</div></div>
-        <div class="fstep"><div class="n">2</div><div><code>json.Unmarshal(tc.Arguments)</code> → <code>args.Text</code></div></div>
-        <div class="fstep"><div class="n">3</div><div>返回 <code>ToolResult{ToolCallID, Name:"echo", Content: text}</code></div></div>
-        <div class="note">JSON 解析失败 → <code>IsError: true</code>，错误写入 Content，不 panic</div>
+        <h2>echo &nbsp;<span style="font-size:.65rem;color:#6e7681;font-weight:400;">toolset: core</span></h2>
+        <div class="fstep"><div class="n">1</div><div><code>json.Unmarshal</code> → <code>args.Text</code></div></div>
+        <div class="fstep"><div class="n">2</div><div>返回 <code>ToolResult{Content: text}</code></div></div>
+        <div class="note">解析失败 → <code>IsError:true, code:"bad_arguments"</code></div>
       </div>
 
       <div class="card t-agent">
-        <h2>路径 B · 未知工具</h2>
-        <div class="fstep"><div class="n">1</div><div>tc.Name 未在 switch 中 → <code>default</code> 分支</div></div>
-        <div class="fstep"><div class="n">2</div><div>返回 <code>ToolResult{IsError:true, Content:'{"error":"unknown tool X"}'}</code></div></div>
-        <div class="note">工具错误作为普通 ToolResult 写入历史——不中断循环，模型可观察并调整策略</div>
+        <h2>read_file &nbsp;<span style="font-size:.65rem;color:#6e7681;font-weight:400;">toolset: file</span></h2>
+        <div class="fstep"><div class="n">1</div><div><code>json.Unmarshal</code> → <code>args.Path</code></div></div>
+        <div class="fstep"><div class="n">2</div><div><code>filepath.Abs(join(cwd, path))</code> · <code>filepath.Rel</code> 安全检查</div></div>
+        <div class="fstep"><div class="n">3</div><div><code>os.ReadFile(abs)</code> → 文件内容</div></div>
+        <div class="note">路径逃出 cwd → <code>code:"path_escape"</code> · 读取失败 → <code>code:"execution_error"</code></div>
       </div>
+    </div>
 
+    <!-- Toolset grouping -->
+    <div class="card" style="margin-top:10px;">
+      <h2>Toolset 分组 &amp; 动态 Schema</h2>
+      <div style="display:flex;gap:16px;flex-wrap:wrap;margin-top:6px;font-size:.74rem;">
+        <div><code style="color:#79c0ff">core</code> → echo</div>
+        <div><code style="color:#79c0ff">file</code> → read_file</div>
+        <div><code style="color:#79c0ff">debugging</code> → core + file（别名展开）</div>
+        <div style="color:#8b949e">默认：<code>enabledToolsets = ["core","file"]</code></div>
+      </div>
+      <div class="note" style="margin-top:6px;"><code>Respond()</code> 每次请求调 <code>globalRegistry.GetSchemas(enabledToolsets)</code> 动态构建 tools 数组，不缓存。新增工具只需在 <code>init()</code> 注册，所有已有 client 自动可见。</div>
     </div>
   </div>
 
@@ -296,8 +317,38 @@
         <tr>
           <td><strong>DispatchTool</strong></td>
           <td><code>tools.go</code></td>
-          <td>switch dispatch · echo 工具 · 错误以 <code>ToolResult{IsError:true}</code> 写入历史</td>
-          <td>Phase 2 c2</td>
+          <td>单行委托 <code>globalRegistry.Dispatch(ctx, tc)</code>，不再含 switch</td>
+          <td>Phase 2 c2 → Phase 3 c2</td>
+        </tr>
+        <tr>
+          <td><strong>Registry</strong></td>
+          <td><code>registry.go</code></td>
+          <td><code>Register</code>（重复 panic）· <code>Dispatch</code>（not found → ToolResult error）· <code>GetSchemas(toolsets)</code>（按 toolset 过滤 + sort）</td>
+          <td>Phase 3 c2</td>
+        </tr>
+        <tr>
+          <td><strong>ToolEntry</strong></td>
+          <td><code>registry.go</code></td>
+          <td>单工具元数据：Name · Toolset · Description · Parameters · Handler 闭包</td>
+          <td>Phase 3 c2</td>
+        </tr>
+        <tr>
+          <td><strong>globalRegistry / init()</strong></td>
+          <td><code>registry.go</code></td>
+          <td>进程级单例；<code>init()</code> 注册 echoEntry + readFileEntry；main() 前完成</td>
+          <td>Phase 3 c2</td>
+        </tr>
+        <tr>
+          <td><strong>read_file</strong></td>
+          <td><code>tools.go</code></td>
+          <td><code>readFileTool(tc, cwd)</code> · <code>filepath.Rel</code> 路径安全 · toolset: <code>"file"</code></td>
+          <td>Phase 3 c1</td>
+        </tr>
+        <tr>
+          <td><strong>toolError</strong></td>
+          <td><code>tools.go</code></td>
+          <td>统一错误 JSON <code>{"error":"...","code":"..."}</code>；code 枚举 4 种</td>
+          <td>Phase 3 c3</td>
         </tr>
         <tr>
           <td><strong>RunConversation</strong></td>
@@ -388,11 +439,11 @@
           <td class="done-c">✅ 完成 · 人工验证</td>
         </tr>
         <tr>
-          <td><span class="future-c">Phase 3</span></td>
+          <td><strong>Phase 3</strong></td>
           <td>Registry / Toolsets</td>
-          <td><code>ToolEntry · Registry · Toolset</code></td>
+          <td><code>read_file · Registry · ToolEntry · toolError · enabledToolsets</code></td>
           <td>第二个工具出现后才重构 registry</td>
-          <td class="future-c">未开始</td>
+          <td class="done-c">✅ 完成 · 人工验证</td>
         </tr>
         <tr>
           <td><span class="future-c">Phase 4</span></td>
@@ -427,7 +478,7 @@
   </div>
 
   <footer style="text-align:center;color:#6e7681;font-size:.68rem;margin-top:36px;padding-top:12px;border-top:1px solid #21262d;">
-    Hermes-Go · hermes-agent/hermes-go · Phase 0–2 complete · 2026-05
+    Hermes-Go · hermes-agent/hermes-go · Phase 0–3 complete · 2026-05
   </footer>
 
 </div>
