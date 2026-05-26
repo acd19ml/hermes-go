@@ -36,24 +36,6 @@ func jsonString(s string) string {
 	return string(b)
 }
 
-// echoToolSpecs returns the OpenAI wire schemas for the echo tool.
-// Still used by OpenAIChatClient.tools until Phase 3 c5 replaces it.
-func echoToolSpecs() []openAIToolSpec {
-	params := json.RawMessage(`{` +
-		`"type":"object",` +
-		`"properties":{"text":{"type":"string","description":"The text to echo back"}},` +
-		`"required":["text"]` +
-		`}`)
-	return []openAIToolSpec{{
-		Type: "function",
-		Function: openAIToolSpecBody{
-			Name:        "echo",
-			Description: "Return the input text unchanged. Useful for verifying tool dispatch.",
-			Parameters:  params,
-		},
-	}}
-}
-
 // DispatchTool delegates to globalRegistry.Dispatch.
 func DispatchTool(ctx context.Context, tc ToolCall) ToolResult {
 	return globalRegistry.Dispatch(ctx, tc)

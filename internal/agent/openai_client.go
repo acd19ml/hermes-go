@@ -29,16 +29,17 @@ const (
 //	BaseURL : OPENAI_BASE_URL env → config.json base_url → https://api.openai.com/v1
 //	Model   : OPENAI_MODEL env → config.json model → gpt-4o-mini
 //
-// tools holds the tool schemas included in every request (Phase 2 c2
-// populates this with the echo tool via echoToolSpecs(); Phase 3 will
-// replace with Registry lookup). When nil, the "tools" field is omitted
-// from the wire — the model behaves as if no tools are available.
+// enabledToolsets controls which tool groups are exposed to the LLM on each
+// request.  Respond calls globalRegistry.GetSchemas(enabledToolsets) to
+// build the tools array dynamically, so the set can differ per client
+// instance without touching the registry.  An empty slice means no tools
+// are advertised (the "tools" field is omitted from the wire).
 type OpenAIChatClient struct {
-	APIKey     string
-	BaseURL    string
-	Model      string
-	httpClient *http.Client
-	tools      []openAIToolSpec // nil until c2 sets echoToolSpecs()
+	APIKey          string
+	BaseURL         string
+	Model           string
+	httpClient      *http.Client
+	enabledToolsets []string // e.g. []string{"core","file"}
 }
 
 // NewOpenAIChatClientFromEnv constructs an OpenAIChatClient using the
@@ -77,7 +78,7 @@ func NewOpenAIChatClientFromEnv() (*OpenAIChatClient, error) {
 		httpClient: &http.Client{
 			Timeout: 60 * time.Second,
 		},
-		tools: echoToolSpecs(), // Phase 2 c2: hardcoded; Phase 3 replaces with Registry
+		enabledToolsets: []string{"core", "file"},
 	}, nil
 }
 
@@ -205,7 +206,7 @@ func (c *OpenAIChatClient) Respond(ctx context.Context, msgs []Message) (Message
 	reqBody := openAIRequest{
 		Model:    c.Model,
 		Messages: wireMsgs,
-		Tools:    c.tools, // nil → omitted from JSON (no-tools mode)
+		Tools:    globalRegistry.GetSchemas(c.enabledToolsets),
 	}
 
 	body, err := json.Marshal(reqBody)
