@@ -303,16 +303,15 @@ func TestOpenAIChatClientRespondToolResultSent(t *testing.T) {
 	}
 }
 
-// ── Phase 2 c2: tool schema wire tests ───────────────────────────────────────
+// ── Phase 3 c5: dynamic schema tests ─────────────────────────────────────────
 
-// TestOpenAIChatClientSendsToolSchemas verifies that when OpenAIChatClient has
-// a tools slice set (e.g. via echoToolSpecs()), the outbound request body
-// includes a "tools" array with the correct function name and type.
-func TestOpenAIChatClientSendsToolSchemas(t *testing.T) {
-	var capturedReq openAIRequest
-
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if err := json.NewDecoder(r.Body).Decode(&capturedReq); err != nil {
+// captureServer starts an httptest server that decodes the request body and
+// returns a minimal success response.  The caller reads capturedReq after the
+// handler fires.
+func captureServer(t *testing.T, capturedReq *openAIRequest) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(capturedReq); err != nil {
 			http.Error(w, "bad body", http.StatusBadRequest)
 			return
 		}
@@ -320,36 +319,91 @@ func TestOpenAIChatClientSendsToolSchemas(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`)) //nolint:errcheck
 	}))
+}
+
+// TestDynamicSchemaCoreOnly verifies that enabledToolsets=["core"] causes
+// Respond to include only the echo schema in the wire request.
+func TestDynamicSchemaCoreOnly(t *testing.T) {
+	var capturedReq openAIRequest
+	srv := captureServer(t, &capturedReq)
 	defer srv.Close()
 
 	c := &OpenAIChatClient{
-		APIKey:     "sk-test",
-		BaseURL:    srv.URL,
-		Model:      defaultOpenAIModel,
-		httpClient: srv.Client(),
-		tools:      echoToolSpecs(), // same initialisation as NewOpenAIChatClientFromEnv
+		APIKey:          "sk-test",
+		BaseURL:         srv.URL,
+		Model:           defaultOpenAIModel,
+		httpClient:      srv.Client(),
+		enabledToolsets: []string{"core"},
 	}
-
 	if _, err := c.Respond(context.Background(), []Message{{Role: RoleUser, Content: "hi"}}); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
 	if len(capturedReq.Tools) != 1 {
-		t.Fatalf("tools count = %d, want 1", len(capturedReq.Tools))
+		t.Fatalf("tools count = %d, want 1 (core only)", len(capturedReq.Tools))
 	}
-	tool := capturedReq.Tools[0]
-	if tool.Type != "function" {
-		t.Errorf("tools[0].type = %q, want %q", tool.Type, "function")
-	}
-	if tool.Function.Name != "echo" {
-		t.Errorf("tools[0].function.name = %q, want %q", tool.Function.Name, "echo")
+	if capturedReq.Tools[0].Function.Name != "echo" {
+		t.Errorf("tools[0].name = %q, want %q", capturedReq.Tools[0].Function.Name, "echo")
 	}
 }
 
-// TestOpenAIChatClientNoToolsFieldWhenNil verifies that when tools is nil
-// (pre-c2 client or test without tools), the wire request omits the "tools"
-// field entirely — OpenAI treats its absence as "no tools available".
-func TestOpenAIChatClientNoToolsFieldWhenNil(t *testing.T) {
+// TestDynamicSchemaFileOnly verifies that enabledToolsets=["file"] causes
+// Respond to include only the read_file schema in the wire request.
+func TestDynamicSchemaFileOnly(t *testing.T) {
+	var capturedReq openAIRequest
+	srv := captureServer(t, &capturedReq)
+	defer srv.Close()
+
+	c := &OpenAIChatClient{
+		APIKey:          "sk-test",
+		BaseURL:         srv.URL,
+		Model:           defaultOpenAIModel,
+		httpClient:      srv.Client(),
+		enabledToolsets: []string{"file"},
+	}
+	if _, err := c.Respond(context.Background(), []Message{{Role: RoleUser, Content: "hi"}}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(capturedReq.Tools) != 1 {
+		t.Fatalf("tools count = %d, want 1 (file only)", len(capturedReq.Tools))
+	}
+	if capturedReq.Tools[0].Function.Name != "read_file" {
+		t.Errorf("tools[0].name = %q, want %q", capturedReq.Tools[0].Function.Name, "read_file")
+	}
+}
+
+// TestDynamicSchemaCoreAndFile verifies that enabledToolsets=["core","file"]
+// sends both schemas (matching the default set from NewOpenAIChatClientFromEnv).
+func TestDynamicSchemaCoreAndFile(t *testing.T) {
+	var capturedReq openAIRequest
+	srv := captureServer(t, &capturedReq)
+	defer srv.Close()
+
+	c := &OpenAIChatClient{
+		APIKey:          "sk-test",
+		BaseURL:         srv.URL,
+		Model:           defaultOpenAIModel,
+		httpClient:      srv.Client(),
+		enabledToolsets: []string{"core", "file"},
+	}
+	if _, err := c.Respond(context.Background(), []Message{{Role: RoleUser, Content: "hi"}}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(capturedReq.Tools) != 2 {
+		t.Fatalf("tools count = %d, want 2 (core+file)", len(capturedReq.Tools))
+	}
+	// GetSchemas sorts by name: echo < read_file
+	if capturedReq.Tools[0].Function.Name != "echo" || capturedReq.Tools[1].Function.Name != "read_file" {
+		t.Errorf("tool names = [%q, %q], want [echo, read_file]",
+			capturedReq.Tools[0].Function.Name, capturedReq.Tools[1].Function.Name)
+	}
+}
+
+// TestDynamicSchemaNoToolsets verifies that an empty enabledToolsets omits the
+// "tools" field from the wire — OpenAI treats its absence as no tools available.
+func TestDynamicSchemaNoToolsets(t *testing.T) {
 	var capturedBody []byte
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -370,14 +424,13 @@ func TestOpenAIChatClientNoToolsFieldWhenNil(t *testing.T) {
 		BaseURL:    srv.URL,
 		Model:      defaultOpenAIModel,
 		httpClient: srv.Client(),
-		// tools: nil — intentionally not set
+		// enabledToolsets: nil — no tools advertised
 	}
-
 	if _, err := c.Respond(context.Background(), []Message{{Role: RoleUser, Content: "hi"}}); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
 	if strings.Contains(string(capturedBody), `"tools"`) {
-		t.Errorf("request body should not contain 'tools' when client.tools is nil; got: %s", capturedBody)
+		t.Errorf("request body should not contain 'tools' when enabledToolsets is nil; got: %s", capturedBody)
 	}
 }
