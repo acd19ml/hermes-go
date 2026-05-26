@@ -2,6 +2,8 @@ package agent
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -97,5 +99,130 @@ func TestDispatchToolPreservesToolCallID(t *testing.T) {
 				t.Errorf("ToolCallID = %q, want %q", got.ToolCallID, c.tc.ID)
 			}
 		})
+	}
+}
+
+// ── read_file tool ────────────────────────────────────────────────────────────
+
+// TestReadFileToolSuccess creates a temporary file and verifies that
+// readFileTool returns its contents correctly when the path is within cwd.
+func TestReadFileToolSuccess(t *testing.T) {
+	dir := t.TempDir()
+	content := "hello from read_file\n"
+	fpath := filepath.Join(dir, "target.txt")
+	if err := os.WriteFile(fpath, []byte(content), 0o644); err != nil {
+		t.Fatalf("setup: write temp file: %v", err)
+	}
+
+	tc := ToolCall{ID: "rf_ok", Name: "read_file", Arguments: `{"path":"target.txt"}`}
+	got := readFileTool(tc, dir)
+
+	if got.IsError {
+		t.Fatalf("IsError = true, want false; content: %s", got.Content)
+	}
+	if got.ToolCallID != "rf_ok" {
+		t.Errorf("ToolCallID = %q, want %q", got.ToolCallID, "rf_ok")
+	}
+	if got.Name != "read_file" {
+		t.Errorf("Name = %q, want %q", got.Name, "read_file")
+	}
+	if got.Content != content {
+		t.Errorf("Content = %q, want %q", got.Content, content)
+	}
+}
+
+// TestReadFileToolPathEscape verifies that paths escaping the cwd (e.g. "../secret")
+// are rejected with IsError=true.
+func TestReadFileToolPathEscape(t *testing.T) {
+	dir := t.TempDir()
+	cases := []string{"../secret", "../../etc/passwd", "subdir/../../outside"}
+	for _, p := range cases {
+		t.Run(p, func(t *testing.T) {
+			tc := ToolCall{ID: "rf_esc", Name: "read_file", Arguments: `{"path":"` + p + `"}`}
+			got := readFileTool(tc, dir)
+			if !got.IsError {
+				t.Errorf("path %q: IsError = false, want true (path escapes cwd)", p)
+			}
+			if !strings.Contains(got.Content, "error") {
+				t.Errorf("path %q: Content %q should contain 'error'", p, got.Content)
+			}
+		})
+	}
+}
+
+// TestReadFileToolBadArgs verifies that non-JSON arguments return IsError=true
+// with an error message the model can read.
+func TestReadFileToolBadArgs(t *testing.T) {
+	dir := t.TempDir()
+	tc := ToolCall{ID: "rf_bad", Name: "read_file", Arguments: `not-json`}
+	got := readFileTool(tc, dir)
+
+	if !got.IsError {
+		t.Errorf("IsError = false, want true for invalid JSON")
+	}
+	if got.ToolCallID != "rf_bad" {
+		t.Errorf("ToolCallID = %q, want %q", got.ToolCallID, "rf_bad")
+	}
+	if !strings.Contains(got.Content, "error") {
+		t.Errorf("Content %q should contain 'error'", got.Content)
+	}
+}
+
+// TestReadFileToolMissing verifies that a non-existent file returns IsError=true.
+func TestReadFileToolMissing(t *testing.T) {
+	dir := t.TempDir()
+	tc := ToolCall{ID: "rf_miss", Name: "read_file", Arguments: `{"path":"does_not_exist.txt"}`}
+	got := readFileTool(tc, dir)
+
+	if !got.IsError {
+		t.Errorf("IsError = false, want true for missing file")
+	}
+	if got.ToolCallID != "rf_miss" {
+		t.Errorf("ToolCallID = %q, want %q", got.ToolCallID, "rf_miss")
+	}
+	if !strings.Contains(got.Content, "error") {
+		t.Errorf("Content %q should contain 'error'", got.Content)
+	}
+}
+
+// TestReadFileToolEmptyPath verifies that an empty path is rejected with IsError=true.
+func TestReadFileToolEmptyPath(t *testing.T) {
+	dir := t.TempDir()
+	tc := ToolCall{ID: "rf_empty", Name: "read_file", Arguments: `{"path":""}`}
+	got := readFileTool(tc, dir)
+
+	if !got.IsError {
+		t.Errorf("IsError = false, want true for empty path")
+	}
+}
+
+// TestDispatchToolReadFile verifies that DispatchTool routes "read_file" to
+// the correct handler (integration with the switch).
+func TestDispatchToolReadFile(t *testing.T) {
+	// Write a file in a temp dir and temporarily change working directory.
+	// getCwd() is called inside DispatchTool; we point os.Chdir there for the test.
+	dir := t.TempDir()
+	content := "dispatched!\n"
+	if err := os.WriteFile(filepath.Join(dir, "probe.txt"), []byte(content), 0o644); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	orig, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	defer func() { _ = os.Chdir(orig) }()
+
+	tc := ToolCall{ID: "rf_dispatch", Name: "read_file", Arguments: `{"path":"probe.txt"}`}
+	got := DispatchTool(context.Background(), tc)
+
+	if got.IsError {
+		t.Fatalf("IsError = true, want false; content: %s", got.Content)
+	}
+	if got.Content != content {
+		t.Errorf("Content = %q, want %q", got.Content, content)
 	}
 }
