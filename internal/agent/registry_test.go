@@ -186,3 +186,58 @@ func TestGetSchemasStableOrder(t *testing.T) {
 		}
 	}
 }
+
+// ── globalRegistry toolset wiring ─────────────────────────────────────────────
+// These tests verify that production tool entries have the correct Toolset
+// values so GetSchemas routes them to the right groups.
+
+// TestGlobalRegistryCoreToolset verifies that GetSchemas(["core"]) returns
+// only the echo tool from globalRegistry.
+func TestGlobalRegistryCoreToolset(t *testing.T) {
+	got := globalRegistry.GetSchemas([]string{"core"})
+	if len(got) != 1 {
+		t.Fatalf("core toolset: len = %d, want 1; schemas: %v", len(got), got)
+	}
+	if got[0].Function.Name != "echo" {
+		t.Errorf("core toolset: Name = %q, want %q", got[0].Function.Name, "echo")
+	}
+}
+
+// TestGlobalRegistryFileToolset verifies that GetSchemas(["file"]) returns
+// only the read_file tool from globalRegistry.
+func TestGlobalRegistryFileToolset(t *testing.T) {
+	got := globalRegistry.GetSchemas([]string{"file"})
+	if len(got) != 1 {
+		t.Fatalf("file toolset: len = %d, want 1; schemas: %v", len(got), got)
+	}
+	if got[0].Function.Name != "read_file" {
+		t.Errorf("file toolset: Name = %q, want %q", got[0].Function.Name, "read_file")
+	}
+}
+
+// TestGlobalRegistryDebuggingToolset verifies that GetSchemas(["debugging"])
+// returns both echo and read_file (alias expands to core + file).
+func TestGlobalRegistryDebuggingToolset(t *testing.T) {
+	got := globalRegistry.GetSchemas([]string{"debugging"})
+	if len(got) != 2 {
+		t.Fatalf("debugging toolset: len = %d, want 2; schemas: %v", len(got), got)
+	}
+	// Results are sorted by name: echo < read_file.
+	if got[0].Function.Name != "echo" || got[1].Function.Name != "read_file" {
+		t.Errorf("debugging toolset: names = [%q, %q], want [echo, read_file]",
+			got[0].Function.Name, got[1].Function.Name)
+	}
+}
+
+// TestGlobalRegistryCoreAndFile verifies that GetSchemas(["core","file"])
+// returns both tools, same as debugging.
+func TestGlobalRegistryCoreAndFile(t *testing.T) {
+	got := globalRegistry.GetSchemas([]string{"core", "file"})
+	if len(got) != 2 {
+		t.Fatalf("core+file: len = %d, want 2", len(got))
+	}
+	if got[0].Function.Name != "echo" || got[1].Function.Name != "read_file" {
+		t.Errorf("core+file: names = [%q, %q], want [echo, read_file]",
+			got[0].Function.Name, got[1].Function.Name)
+	}
+}

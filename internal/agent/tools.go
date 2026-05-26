@@ -69,6 +69,7 @@ func echoEntry() ToolEntry {
 		`}`)
 	return ToolEntry{
 		Name:        "echo",
+		Toolset:     "core",
 		Description: "Return the input text unchanged. Useful for verifying tool dispatch.",
 		Parameters:  params,
 		Handler: func(_ context.Context, tc ToolCall) ToolResult {
@@ -106,6 +107,7 @@ func readFileEntry() ToolEntry {
 		`}`)
 	return ToolEntry{
 		Name:        "read_file",
+		Toolset:     "file",
 		Description: "Read the contents of a file at the given path (relative to the current working directory). Returns the file contents as a string.",
 		Parameters:  params,
 		Handler: func(_ context.Context, tc ToolCall) ToolResult {
