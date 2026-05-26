@@ -1,0 +1,435 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Hermes-Go — Phase 0–2 Architecture</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+      background: #0d1117; color: #c9d1d9;
+      padding: 28px 20px 60px; line-height: 1.5;
+    }
+    h1  { font-size: 1.4rem;  font-weight: 700; color: #e6edf3; }
+    h2  { font-size: .88rem;  font-weight: 600; color: #79c0ff; margin-bottom: 8px; }
+    p   { font-size: .76rem; }
+    code {
+      font-family: 'Cascadia Code','Fira Code',monospace;
+      font-size: .71rem; background: #21262d; padding: 1px 5px; border-radius: 4px;
+    }
+
+    .page    { max-width: 1080px; margin: 0 auto; }
+    .header  { margin-bottom: 22px; }
+    .subtitle{ font-size: .76rem; color: #8b949e; margin-top: 4px; }
+
+    .badge {
+      display: inline-block; font-size: .61rem; font-weight: 600;
+      padding: 2px 7px; border-radius: 12px; vertical-align: middle; margin-left: 6px;
+    }
+    .done-b { background: #1a4731; color: #56d364; border: 1px solid #2ea04326; }
+
+    .section      { margin-bottom: 28px; }
+    .section-title {
+      font-size: .66rem; font-weight: 700; letter-spacing: 1.1px;
+      text-transform: uppercase; color: #6e7681;
+      margin-bottom: 10px; padding-bottom: 5px; border-bottom: 1px solid #21262d;
+    }
+
+    .svg-wrap     { background: #0d1117; border: 1px solid #30363d; border-radius: 10px; overflow: hidden; }
+    .svg-wrap svg { display: block; width: 100%; height: auto; }
+
+    .grid { display: grid; gap: 10px; }
+    .g2   { grid-template-columns: 1fr 1fr; }
+    @media(max-width: 680px) { .g2 { grid-template-columns: 1fr; } }
+
+    .card    { border-radius: 8px; padding: 12px 14px; border: 1px solid #30363d; background: #161b22; }
+    .t-agent { border-top: 3px solid #79c0ff; }
+
+    .fstep {
+      display: flex; align-items: flex-start; gap: 8px;
+      padding: 6px 8px; background: #0d1117; border-radius: 5px; margin-bottom: 4px;
+      font-size: .74rem;
+    }
+    .fstep .n {
+      min-width: 18px; height: 18px; border-radius: 50%;
+      background: #21262d; color: #79c0ff; font-size: .6rem; font-weight: 700;
+      display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+    }
+    .note {
+      font-size: .71rem; color: #8b949e;
+      margin-top: 6px; padding: 5px 8px; border-left: 2px solid #30363d;
+    }
+
+    table { width: 100%; border-collapse: collapse; font-size: .74rem; }
+    th {
+      text-align: left; padding: 7px 12px; background: #21262d;
+      color: #79c0ff; font-weight: 600; font-size: .72rem;
+    }
+    td { padding: 5px 12px; border-bottom: 1px solid #21262d; vertical-align: top; }
+    tr:hover td { background: #1c2128; }
+    .done-c   { color: #56d364; font-weight: 600; }
+    .future-c { color: #6e7681; }
+
+    .chain { display: flex; align-items: stretch; flex-wrap: wrap; gap: 0; }
+    .cn    { padding: 8px 13px; border-radius: 7px; font-size: .73rem; }
+    .ca    { color: #58a6ff; font-size: 1.1rem; padding: 0 8px; display: flex; align-items: center; }
+  </style>
+</head>
+<body>
+<div class="page">
+
+  <!-- ── Header ──────────────────────────────────────────────────────────── -->
+  <div class="header">
+    <h1>Hermes-Go Architecture
+      <span class="badge done-b">Phase 0 ✅</span>
+      <span class="badge done-b">Phase 1 ✅</span>
+      <span class="badge done-b">Phase 2 ✅</span>
+    </h1>
+    <p class="subtitle">Go 复现 Hermes Agent · v0.0.1 · 2026-05 · 51 tests · 人工验证 ✓</p>
+  </div>
+
+  <!-- ── 1. RunConversation 主循环流程图 ────────────────────────────────── -->
+  <div class="section">
+    <div class="section-title">主循环 RunConversation — internal/agent/conversation.go（Phase 2 c3–c5）</div>
+    <div class="svg-wrap">
+      <svg viewBox="0 0 690 880" xmlns="http://www.w3.org/2000/svg"
+           font-family="'Segoe UI',system-ui,sans-serif">
+        <defs>
+          <marker id="ab" markerWidth="7" markerHeight="5" refX="6" refY="2.5" orient="auto">
+            <polygon points="0 0,7 2.5,0 5" fill="#58a6ff"/>
+          </marker>
+          <marker id="ag" markerWidth="7" markerHeight="5" refX="6" refY="2.5" orient="auto">
+            <polygon points="0 0,7 2.5,0 5" fill="#56d364"/>
+          </marker>
+          <marker id="ar" markerWidth="7" markerHeight="5" refX="6" refY="2.5" orient="auto">
+            <polygon points="0 0,7 2.5,0 5" fill="#f78166"/>
+          </marker>
+        </defs>
+
+        <rect width="690" height="880" fill="#0d1117"/>
+
+        <!-- ── START terminal ── -->
+        <rect x="210" y="20" width="280" height="36" rx="18"
+              fill="#1a3a2d" stroke="#56d364" stroke-width="1.5"/>
+        <text x="350" y="43" text-anchor="middle"
+              fill="#56d364" font-size="11" font-weight="600">RunConversation(ctx, msg, maxIter)</text>
+
+        <line x1="350" y1="56" x2="350" y2="70" stroke="#58a6ff" stroke-width="1.5" marker-end="url(#ab)"/>
+
+        <!-- ── INIT ── -->
+        <rect x="210" y="70" width="280" height="52" rx="6"
+              fill="#21262d" stroke="#4a9eff" stroke-width="1.5"/>
+        <text x="350" y="89"  text-anchor="middle" fill="#c9d1d9" font-size="10">budget = {Max: maxIter}</text>
+        <text x="350" y="104" text-anchor="middle" fill="#c9d1d9" font-size="10">msgs = [system, user]</text>
+        <text x="350" y="115" text-anchor="middle" fill="#8b949e" font-size="9">prevKey = ""  ·  warnCount = 0</text>
+
+        <line x1="350" y1="122" x2="350" y2="143" stroke="#58a6ff" stroke-width="1.5" marker-end="url(#ab)"/>
+
+        <!-- ── BUDGET ── -->
+        <rect x="210" y="143" width="280" height="36" rx="6"
+              fill="#21262d" stroke="#4a9eff" stroke-width="1.5"/>
+        <text x="350" y="166" text-anchor="middle" fill="#c9d1d9" font-size="11">budget.Consume()</text>
+
+        <line x1="350" y1="179" x2="350" y2="196" stroke="#58a6ff" stroke-width="1.5" marker-end="url(#ab)"/>
+
+        <!-- ── ◇ exhausted? cy=226 ── -->
+        <polygon points="350,196 440,226 350,256 260,226" fill="#2a2208" stroke="#e3b341" stroke-width="1.5"/>
+        <text x="350" y="230" text-anchor="middle" fill="#e3b341" font-size="10">exhausted?</text>
+        <!-- YES → right -->
+        <text x="446" y="219" fill="#e3b341" font-size="8">YES</text>
+        <line x1="440" y1="226" x2="484" y2="226" stroke="#f78166" stroke-width="1.5" marker-end="url(#ar)"/>
+        <rect x="484" y="208" width="185" height="36" rx="6" fill="#2a1010" stroke="#f78166" stroke-width="1.5"/>
+        <text x="576" y="231" text-anchor="middle" fill="#f78166" font-size="10">❌ budget exhausted</text>
+        <!-- NO ↓ -->
+        <text x="356" y="268" fill="#e3b341" font-size="8">NO</text>
+        <line x1="350" y1="256" x2="350" y2="273" stroke="#58a6ff" stroke-width="1.5" marker-end="url(#ab)"/>
+
+        <!-- ── DROPORPHAN ── -->
+        <rect x="210" y="273" width="280" height="36" rx="6"
+              fill="#21262d" stroke="#4a9eff" stroke-width="1.5"/>
+        <text x="350" y="296" text-anchor="middle" fill="#c9d1d9" font-size="10">dropOrphanToolResults(msgs)</text>
+
+        <line x1="350" y1="309" x2="350" y2="326" stroke="#58a6ff" stroke-width="1.5" marker-end="url(#ab)"/>
+
+        <!-- ── RESPOND ── -->
+        <rect x="210" y="326" width="280" height="36" rx="6"
+              fill="#21262d" stroke="#4a9eff" stroke-width="1.5"/>
+        <text x="350" y="349" text-anchor="middle" fill="#c9d1d9" font-size="11">client.Respond(ctx, msgs)</text>
+
+        <line x1="350" y1="362" x2="350" y2="379" stroke="#58a6ff" stroke-width="1.5" marker-end="url(#ab)"/>
+
+        <!-- ── ◇ LLM error? cy=409 ── -->
+        <polygon points="350,379 440,409 350,439 260,409" fill="#2a2208" stroke="#e3b341" stroke-width="1.5"/>
+        <text x="350" y="413" text-anchor="middle" fill="#e3b341" font-size="10">LLM error?</text>
+        <text x="446" y="402" fill="#e3b341" font-size="8">YES</text>
+        <line x1="440" y1="409" x2="484" y2="409" stroke="#f78166" stroke-width="1.5" marker-end="url(#ar)"/>
+        <rect x="484" y="391" width="185" height="36" rx="6" fill="#2a1010" stroke="#f78166" stroke-width="1.5"/>
+        <text x="576" y="414" text-anchor="middle" fill="#f78166" font-size="10">❌ llm call failed</text>
+        <text x="356" y="451" fill="#e3b341" font-size="8">NO</text>
+        <line x1="350" y1="439" x2="350" y2="456" stroke="#58a6ff" stroke-width="1.5" marker-end="url(#ab)"/>
+
+        <!-- ── APPEND ── -->
+        <rect x="210" y="456" width="280" height="36" rx="6"
+              fill="#21262d" stroke="#4a9eff" stroke-width="1.5"/>
+        <text x="350" y="479" text-anchor="middle" fill="#c9d1d9" font-size="11">msgs = append(msgs, resp)</text>
+
+        <line x1="350" y1="492" x2="350" y2="509" stroke="#58a6ff" stroke-width="1.5" marker-end="url(#ab)"/>
+
+        <!-- ── ◇ ToolCalls? cy=539 ── -->
+        <polygon points="350,509 440,539 350,569 260,539" fill="#2a2208" stroke="#e3b341" stroke-width="1.5"/>
+        <text x="350" y="543" text-anchor="middle" fill="#e3b341" font-size="10">ToolCalls?</text>
+        <!-- YES (has calls) ↓ -->
+        <text x="323" y="581" fill="#e3b341" font-size="8">YES (has calls)</text>
+        <line x1="350" y1="569" x2="350" y2="586" stroke="#58a6ff" stroke-width="1.5" marker-end="url(#ab)"/>
+        <!-- NO (none) → return -->
+        <text x="446" y="532" fill="#e3b341" font-size="8">NO (none)</text>
+        <line x1="440" y1="539" x2="484" y2="539" stroke="#56d364" stroke-width="1.5" marker-end="url(#ag)"/>
+        <rect x="484" y="521" width="185" height="36" rx="6" fill="#1a3a2d" stroke="#56d364" stroke-width="1.5"/>
+        <text x="576" y="544" text-anchor="middle" fill="#56d364" font-size="10">✅ return resp  (final answer)</text>
+
+        <!-- ── NOPROGRESS (h=54) ── -->
+        <rect x="210" y="586" width="280" height="54" rx="6"
+              fill="#21262d" stroke="#4a9eff" stroke-width="1.5"/>
+        <text x="350" y="604" text-anchor="middle" fill="#c9d1d9" font-size="10">currentKey = toolCallKey(tcs)  ·  prevKey = curr</text>
+        <text x="350" y="619" text-anchor="middle" fill="#c9d1d9" font-size="10">noProgress = (prevKey != "" &amp;&amp; key == prevKey)</text>
+        <text x="350" y="634" text-anchor="middle" fill="#8b949e" font-size="9">noProgress → warnCount++    else → warnCount = 0</text>
+
+        <line x1="350" y1="640" x2="350" y2="657" stroke="#58a6ff" stroke-width="1.5" marker-end="url(#ab)"/>
+
+        <!-- ── ◇ warnCount > 3? cy=687 ── -->
+        <polygon points="350,657 440,687 350,717 260,687" fill="#2a2208" stroke="#e3b341" stroke-width="1.5"/>
+        <text x="350" y="691" text-anchor="middle" fill="#e3b341" font-size="10">warnCount &gt; 3?</text>
+        <text x="446" y="680" fill="#e3b341" font-size="8">YES</text>
+        <line x1="440" y1="687" x2="484" y2="687" stroke="#f78166" stroke-width="1.5" marker-end="url(#ar)"/>
+        <rect x="484" y="669" width="185" height="36" rx="6" fill="#2a1010" stroke="#f78166" stroke-width="1.5"/>
+        <text x="576" y="692" text-anchor="middle" fill="#f78166" font-size="10">❌ no-progress error</text>
+        <text x="356" y="729" fill="#e3b341" font-size="8">NO</text>
+        <line x1="350" y1="717" x2="350" y2="734" stroke="#58a6ff" stroke-width="1.5" marker-end="url(#ab)"/>
+
+        <!-- ── DISPATCH ── -->
+        <rect x="210" y="734" width="280" height="36" rx="6"
+              fill="#21262d" stroke="#4a9eff" stroke-width="1.5"/>
+        <text x="350" y="757" text-anchor="middle" fill="#c9d1d9" font-size="10">DispatchTool(tc) for each tc · append ToolResults</text>
+
+        <line x1="350" y1="770" x2="350" y2="787" stroke="#58a6ff" stroke-width="1.5" marker-end="url(#ab)"/>
+
+        <!-- ── INJECT ── -->
+        <rect x="210" y="787" width="280" height="36" rx="6"
+              fill="#21262d" stroke="#4a9eff" stroke-width="1.5"/>
+        <text x="350" y="810" text-anchor="middle" fill="#c9d1d9" font-size="10">if noProgress → msgs += warning (RoleUser)</text>
+
+        <!-- ── LOOP-BACK PATH ── -->
+        <path d="M 350,823 L 350,853 L 70,853 L 70,161 L 209,161"
+              stroke="#4a9eff" stroke-width="1.5" fill="none" opacity="0.45"
+              marker-end="url(#ab)"/>
+
+        <!-- Loop label along left spine -->
+        <text fill="#4a9eff" font-size="9" font-weight="600" opacity="0.65"
+              text-anchor="middle" transform="translate(53,507) rotate(-90)">↻  L O O P</text>
+
+      </svg>
+    </div>
+  </div>
+
+  <!-- ── 2. Tool Dispatch ────────────────────────────────────────────────── -->
+  <div class="section">
+    <div class="section-title">工具派发 DispatchTool — internal/agent/tools.go（Phase 2 c2）</div>
+    <div class="grid g2">
+
+      <div class="card t-agent">
+        <h2>路径 A · echo 工具</h2>
+        <div class="fstep"><div class="n">1</div><div>tc.Name = <code>"echo"</code> → switch 命中</div></div>
+        <div class="fstep"><div class="n">2</div><div><code>json.Unmarshal(tc.Arguments)</code> → <code>args.Text</code></div></div>
+        <div class="fstep"><div class="n">3</div><div>返回 <code>ToolResult{ToolCallID, Name:"echo", Content: text}</code></div></div>
+        <div class="note">JSON 解析失败 → <code>IsError: true</code>，错误写入 Content，不 panic</div>
+      </div>
+
+      <div class="card t-agent">
+        <h2>路径 B · 未知工具</h2>
+        <div class="fstep"><div class="n">1</div><div>tc.Name 未在 switch 中 → <code>default</code> 分支</div></div>
+        <div class="fstep"><div class="n">2</div><div>返回 <code>ToolResult{IsError:true, Content:'{"error":"unknown tool X"}'}</code></div></div>
+        <div class="note">工具错误作为普通 ToolResult 写入历史——不中断循环，模型可观察并调整策略</div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ── 3. Component Reference ─────────────────────────────────────────── -->
+  <div class="section">
+    <div class="section-title">组件快速参考</div>
+    <table>
+      <thead>
+        <tr><th>组件</th><th>文件</th><th>核心职责</th><th>引入</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>AIAgent</strong></td>
+          <td><code>internal/agent/agent.go</code></td>
+          <td><code>RunOnce</code> 单轮 · <code>RunConversation</code> 多轮 · systemPrompt byte-static · budget 注入</td>
+          <td>Phase 1</td>
+        </tr>
+        <tr>
+          <td><strong>chatClient</strong> <em style="color:#39d3bb;font-size:.67rem">interface</em></td>
+          <td><code>openai_client.go</code></td>
+          <td><code>Respond(ctx, []Message)(Message,error)</code> — provider seam，2 个生产实现后提取</td>
+          <td>Phase 1 c2</td>
+        </tr>
+        <tr>
+          <td><strong>OpenAIChatClient</strong></td>
+          <td><code>openai_client.go</code></td>
+          <td>POST /chat/completions · 双向 tool_call wire 映射 · <code>tools[]</code> schema 注入</td>
+          <td>Phase 1–2</td>
+        </tr>
+        <tr>
+          <td><strong>StaticResponder</strong></td>
+          <td><code>static_responder.go</code></td>
+          <td>测试替身 · 回显最后一条 user msg · 永不返回 error</td>
+          <td>Phase 0</td>
+        </tr>
+        <tr>
+          <td><strong>IterationBudget</strong></td>
+          <td><code>budget.go</code></td>
+          <td><code>Consume()</code> / <code>Remaining()</code> · RunConversation 每次调用独立实例化</td>
+          <td>Phase 1 c4</td>
+        </tr>
+        <tr>
+          <td><strong>DispatchTool</strong></td>
+          <td><code>tools.go</code></td>
+          <td>switch dispatch · echo 工具 · 错误以 <code>ToolResult{IsError:true}</code> 写入历史</td>
+          <td>Phase 2 c2</td>
+        </tr>
+        <tr>
+          <td><strong>RunConversation</strong></td>
+          <td><code>conversation.go</code></td>
+          <td>LLM→tool→result 循环 · dropOrphanToolResults · no-progress guardrail</td>
+          <td>Phase 2 c3–c5</td>
+        </tr>
+        <tr>
+          <td><strong>toolCallKey</strong></td>
+          <td><code>conversation.go</code></td>
+          <td>fingerprint <code>Name\x00Args</code> per entry，<code>\x01</code> 分隔 · ID 排除 · 顺序敏感</td>
+          <td>Phase 2 c5</td>
+        </tr>
+        <tr>
+          <td><strong>Config / FetchModels</strong></td>
+          <td><code>internal/config/</code></td>
+          <td><code>Load · Save(0600) · DefaultPath · GET /models · ModelType Unmarshaler</code></td>
+          <td>Phase 1</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- ── 4. Config Fallback Chain ───────────────────────────────────────── -->
+  <div class="section">
+    <div class="section-title">配置降级链 firstNonEmpty()</div>
+    <div class="card">
+      <div class="chain">
+        <div class="cn" style="background:#2d2208;border:1px solid #e3b34144;color:#e3b341;">
+          <div style="font-size:.69rem;font-weight:700;margin-bottom:3px;">① 环境变量</div>
+          <code style="color:#e3b341aa;display:block">OPENAI_API_KEY</code>
+          <code style="color:#e3b341aa;display:block">OPENAI_BASE_URL</code>
+          <code style="color:#e3b341aa;display:block">OPENAI_MODEL</code>
+        </div>
+        <div class="ca">→</div>
+        <div class="cn" style="background:#16111e;border:1px solid #d2a8ff44;color:#d2a8ff;">
+          <div style="font-size:.69rem;font-weight:700;margin-bottom:3px;">② config 文件</div>
+          <code style="color:#d2a8ffaa;display:block">~/.hermes-go/config.json</code>
+          <code style="color:#d2a8ffaa;display:block">HERMES_CONFIG 覆盖路径</code>
+          <code style="color:#d2a8ffaa;display:block">/dev/null → 测试隔离</code>
+        </div>
+        <div class="ca">→</div>
+        <div class="cn" style="background:#1a2e1a;border:1px solid #56d36444;color:#56d364;">
+          <div style="font-size:.69rem;font-weight:700;margin-bottom:3px;">③ 内置默认</div>
+          <code style="color:#56d364aa;display:block">api.openai.com/v1</code>
+          <code style="color:#56d364aa;display:block">gpt-4o-mini</code>
+        </div>
+        <div class="ca">→</div>
+        <div class="cn" style="background:#2a1010;border:1px solid #f7816644;color:#f78166;">
+          <div style="font-size:.69rem;font-weight:700;margin-bottom:3px;">✗ APIKey 仍空</div>
+          <code style="color:#f78166aa;display:block">return nil, error</code>
+          <code style="color:#f78166aa;display:block">CLI: exit 1</code>
+        </div>
+      </div>
+      <p class="note" style="margin-top:8px;">
+        APIKey 无内置默认——缺失时 error 退出，不 fallback 到 StaticResponder。
+      </p>
+    </div>
+  </div>
+
+  <!-- ── 5. Roadmap ─────────────────────────────────────────────────────── -->
+  <div class="section">
+    <div class="section-title">演化路线图</div>
+    <table>
+      <thead>
+        <tr><th>阶段</th><th>主题</th><th>关键新增</th><th>抽象纪律</th><th>状态</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>Phase 0</strong></td>
+          <td>最小 CLI + 消息结构</td>
+          <td><code>Message · StaticResponder · --msg</code></td>
+          <td>无 interface；无 chatClient</td>
+          <td class="done-c">✅ 完成</td>
+        </tr>
+        <tr>
+          <td><strong>Phase 1</strong></td>
+          <td>真实 LLM 单轮调用</td>
+          <td><code>OpenAIChatClient · AIAgent · IterationBudget · --configure</code></td>
+          <td>先具体 OpenAI，c2 提 chatClient（2 实现后）</td>
+          <td class="done-c">✅ 完成</td>
+        </tr>
+        <tr>
+          <td><strong>Phase 2</strong></td>
+          <td>单工具调用循环</td>
+          <td>tool-call wire · echo · RunConversation · dropOrphans · no-progress guardrail</td>
+          <td>硬编码 switch dispatch；不建 Tool interface</td>
+          <td class="done-c">✅ 完成 · 人工验证</td>
+        </tr>
+        <tr>
+          <td><span class="future-c">Phase 3</span></td>
+          <td>Registry / Toolsets</td>
+          <td><code>ToolEntry · Registry · Toolset</code></td>
+          <td>第二个工具出现后才重构 registry</td>
+          <td class="future-c">未开始</td>
+        </tr>
+        <tr>
+          <td><span class="future-c">Phase 4</span></td>
+          <td>Prompt Builder + byte-static cache</td>
+          <td><code>PromptBuilder</code> · SOUL.md · 项目上下文</td>
+          <td>先字符串后 parts；会话内不重建</td>
+          <td class="future-c">未开始</td>
+        </tr>
+        <tr>
+          <td><span class="future-c">Phase 5</span></td>
+          <td>文件、终端与安全底座</td>
+          <td>large result · write_file · checkpoint · secret redaction</td>
+          <td>mutating tool 必须有 checkpoint</td>
+          <td class="future-c">未开始</td>
+        </tr>
+        <tr>
+          <td><span class="future-c">Phase 6</span></td>
+          <td>第二条 API 路径 → Transport 重构</td>
+          <td><code>AnthropicClient → Transport · NormalizedResponse</code></td>
+          <td>两条 API mode 后才提 Transport</td>
+          <td class="future-c">未开始</td>
+        </tr>
+        <tr>
+          <td><span class="future-c">Phase 7–12</span></td>
+          <td>压缩 / Memory / Web / Multi-agent / MCP</td>
+          <td>—</td>
+          <td>按 Hermes-Wiki 时机引入</td>
+          <td class="future-c">未开始</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <footer style="text-align:center;color:#6e7681;font-size:.68rem;margin-top:36px;padding-top:12px;border-top:1px solid #21262d;">
+    Hermes-Go · hermes-agent/hermes-go · Phase 0–2 complete · 2026-05
+  </footer>
+
+</div>
+</body>
+</html>
