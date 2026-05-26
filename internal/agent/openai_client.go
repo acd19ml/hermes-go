@@ -28,11 +28,17 @@ const (
 //	APIKey  : OPENAI_API_KEY env → ~/.hermes-go/config.json api_key
 //	BaseURL : OPENAI_BASE_URL env → config.json base_url → https://api.openai.com/v1
 //	Model   : OPENAI_MODEL env → config.json model → gpt-4o-mini
+//
+// tools holds the tool schemas included in every request (Phase 2 c2
+// populates this with the echo tool via echoToolSpecs(); Phase 3 will
+// replace with Registry lookup). When nil, the "tools" field is omitted
+// from the wire — the model behaves as if no tools are available.
 type OpenAIChatClient struct {
 	APIKey     string
 	BaseURL    string
 	Model      string
 	httpClient *http.Client
+	tools      []openAIToolSpec // nil until c2 sets echoToolSpecs()
 }
 
 // NewOpenAIChatClientFromEnv constructs an OpenAIChatClient using the
@@ -71,6 +77,7 @@ func NewOpenAIChatClientFromEnv() (*OpenAIChatClient, error) {
 		httpClient: &http.Client{
 			Timeout: 60 * time.Second,
 		},
+		tools: echoToolSpecs(), // Phase 2 c2: hardcoded; Phase 3 replaces with Registry
 	}, nil
 }
 
@@ -86,21 +93,65 @@ func firstNonEmpty(vals ...string) string {
 
 // ── unexported wire types ────────────────────────────────────────────────────
 
+// openAIToolCallFunction mirrors OpenAI's function sub-object inside a
+// tool_call entry.  Arguments is a JSON-encoded string — the same shape as
+// our internal ToolCall.Arguments, so no extra parse/re-encode is needed.
+type openAIToolCallFunction struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"` // JSON-encoded, e.g. `{"text":"hi"}`
+}
+
+// openAIToolCall is one entry in the tool_calls array that the API returns
+// when the model decides to invoke a tool.
+type openAIToolCall struct {
+	ID       string                 `json:"id"`
+	Type     string                 `json:"type"`     // always "function"
+	Function openAIToolCallFunction `json:"function"`
+}
+
+// openAIToolSpecBody is the function definition nested inside openAIToolSpec.
+type openAIToolSpecBody struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description,omitempty"`
+	Parameters  json.RawMessage `json:"parameters,omitempty"` // JSON Schema object
+}
+
+// openAIToolSpec is the wire representation of a tool definition sent to the
+// API in the "tools" request field.  Phase 2 c1 defines the type; c2 fills
+// OpenAIChatClient.tools with the echo tool via echoToolSpecs().
+type openAIToolSpec struct {
+	Type     string             `json:"type"` // always "function"
+	Function openAIToolSpecBody `json:"function"`
+}
+
 // openAIMessage is the per-turn object in an OpenAI Chat Completions request
-// or response. Phase 1 only handles text content (no tool_calls on the wire).
+// or response.  Phase 2 extends it to carry tool_calls and tool_call_id.
+//
+// Content is tagged omitempty for two reasons:
+//  1. When the model responds with tool_calls, the API returns content:null;
+//     Go's json package decodes null into "" for a string field, and omitempty
+//     then drops the empty field when we re-serialise the message in a later
+//     turn — OpenAI accepts content being absent in that case.
+//  2. Tool-result messages (role:"tool") set content but not the other fields;
+//     omitempty keeps the wire clean for the fields that are zero.
 type openAIMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role       string           `json:"role"`
+	Content    string           `json:"content,omitempty"`
+	ToolCalls  []openAIToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string           `json:"tool_call_id,omitempty"`
 }
 
 // openAIRequest is the JSON body sent to /chat/completions.
+// Tools carries tool definitions when the client has any registered;
+// omitempty ensures the field is absent from the wire when nil (no-tools mode).
 type openAIRequest struct {
-	Model    string          `json:"model"`
-	Messages []openAIMessage `json:"messages"`
+	Model    string           `json:"model"`
+	Messages []openAIMessage  `json:"messages"`
+	Tools    []openAIToolSpec `json:"tools,omitempty"`
 }
 
 // openAIResponse is the top-level JSON body returned by /chat/completions.
-// Only fields needed by Phase 1 are decoded.
+// openAIMessage now decodes both content and tool_calls automatically.
 type openAIResponse struct {
 	Choices []struct {
 		Message openAIMessage `json:"message"`
@@ -113,19 +164,49 @@ type openAIResponse struct {
 // ── public method ────────────────────────────────────────────────────────────
 
 // Respond sends msgs to the OpenAI Chat Completions API and returns the
-// assistant reply. The first element of msgs is conventionally a system
-// message injected by AIAgent (Phase 1 c3); OpenAI accepts it verbatim as
-// the first array element, so no special handling is needed here.
+// assistant reply.  The mapping is bidirectional:
+//
+// Outbound (internal → wire):
+//   - Message.ToolCalls  → openAIMessage.ToolCalls   (assistant turn in history)
+//   - Message.ToolCallID → openAIMessage.ToolCallID  (role:"tool" result messages)
+//   - c.tools            → openAIRequest.Tools        (tool definitions; nil = absent)
+//
+// Inbound (wire → internal):
+//   - choices[0].message.tool_calls → Message.ToolCalls
+//   - choices[0].message.content    → Message.Content ("" when API returns null)
 //
 // On non-200 HTTP status the raw body is included in the returned error.
-// On success, choices[0].message is wrapped into a Message{RoleAssistant}.
 func (c *OpenAIChatClient) Respond(ctx context.Context, msgs []Message) (Message, error) {
 	// ── build request body ────────────────────────────────────────────────
 	wireMsgs := make([]openAIMessage, len(msgs))
 	for i, m := range msgs {
-		wireMsgs[i] = openAIMessage{Role: m.Role, Content: m.Content}
+		wm := openAIMessage{
+			Role:       m.Role,
+			Content:    m.Content,
+			ToolCallID: m.ToolCallID,
+		}
+		// Map internal ToolCalls → wire function sub-object.
+		// Only assistant messages carry ToolCalls; other roles will have nil.
+		if len(m.ToolCalls) > 0 {
+			wm.ToolCalls = make([]openAIToolCall, len(m.ToolCalls))
+			for j, tc := range m.ToolCalls {
+				wm.ToolCalls[j] = openAIToolCall{
+					ID:   tc.ID,
+					Type: "function",
+					Function: openAIToolCallFunction{
+						Name:      tc.Name,
+						Arguments: tc.Arguments,
+					},
+				}
+			}
+		}
+		wireMsgs[i] = wm
 	}
-	reqBody := openAIRequest{Model: c.Model, Messages: wireMsgs}
+	reqBody := openAIRequest{
+		Model:    c.Model,
+		Messages: wireMsgs,
+		Tools:    c.tools, // nil → omitted from JSON (no-tools mode)
+	}
 
 	body, err := json.Marshal(reqBody)
 	if err != nil {
@@ -166,8 +247,23 @@ func (c *OpenAIChatClient) Respond(ctx context.Context, msgs []Message) (Message
 		return Message{}, fmt.Errorf("openai client: response contained no choices")
 	}
 
-	return Message{
+	// Map wire response → internal Message.
+	// Content: Go's json package decodes JSON null into "" for a string
+	// field, which is correct — empty string means "no text, only tool calls".
+	wm := apiResp.Choices[0].Message
+	result := Message{
 		Role:    RoleAssistant,
-		Content: apiResp.Choices[0].Message.Content,
-	}, nil
+		Content: wm.Content,
+	}
+	if len(wm.ToolCalls) > 0 {
+		result.ToolCalls = make([]ToolCall, len(wm.ToolCalls))
+		for i, wtc := range wm.ToolCalls {
+			result.ToolCalls[i] = ToolCall{
+				ID:        wtc.ID,
+				Name:      wtc.Function.Name,
+				Arguments: wtc.Function.Arguments,
+			}
+		}
+	}
+	return result, nil
 }

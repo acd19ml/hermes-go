@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -150,5 +151,233 @@ func TestOpenAIChatClientSystemMessagePassthrough(t *testing.T) {
 	}
 	if captured.Messages[1].Role != RoleUser {
 		t.Errorf("messages[1].role = %q, want %q", captured.Messages[1].Role, RoleUser)
+	}
+}
+
+// ── Phase 2 c1: tool-call wire parsing tests ──────────────────────────────────
+
+// TestOpenAIChatClientRespondToolCallParsed verifies that when the API returns
+// an assistant message with tool_calls (and null content), Respond correctly
+// populates Message.ToolCalls and leaves Content empty.
+func TestOpenAIChatClientRespondToolCallParsed(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		// Realistic OpenAI response: content is null, tool_calls is populated.
+		w.Write([]byte(`{
+			"choices":[{
+				"message":{
+					"role":"assistant",
+					"content":null,
+					"tool_calls":[{
+						"id":"call_abc123",
+						"type":"function",
+						"function":{
+							"name":"echo",
+							"arguments":"{\"text\":\"hello\"}"
+						}
+					}]
+				},
+				"finish_reason":"tool_calls"
+			}]
+		}`)) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	c := &OpenAIChatClient{
+		APIKey:     "sk-test",
+		BaseURL:    srv.URL,
+		Model:      defaultOpenAIModel,
+		httpClient: srv.Client(),
+	}
+
+	got, err := c.Respond(context.Background(), []Message{{Role: RoleUser, Content: "echo hello"}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.Role != RoleAssistant {
+		t.Errorf("Role = %q, want %q", got.Role, RoleAssistant)
+	}
+	// content:null in wire → "" in Go (json decode behaviour); omitempty drops it
+	if got.Content != "" {
+		t.Errorf("Content = %q, want empty (tool_calls response has null content)", got.Content)
+	}
+	if len(got.ToolCalls) != 1 {
+		t.Fatalf("ToolCalls len = %d, want 1", len(got.ToolCalls))
+	}
+	tc := got.ToolCalls[0]
+	if tc.ID != "call_abc123" {
+		t.Errorf("ToolCalls[0].ID = %q, want %q", tc.ID, "call_abc123")
+	}
+	if tc.Name != "echo" {
+		t.Errorf("ToolCalls[0].Name = %q, want %q", tc.Name, "echo")
+	}
+	if tc.Arguments != `{"text":"hello"}` {
+		t.Errorf("ToolCalls[0].Arguments = %q, want %q", tc.Arguments, `{"text":"hello"}`)
+	}
+}
+
+// TestOpenAIChatClientRespondToolResultSent verifies the outbound mapping:
+// an assistant message with ToolCalls and a subsequent tool-result message are
+// serialised to the correct OpenAI wire format (including tool_call_id and the
+// nested function sub-object).
+func TestOpenAIChatClientRespondToolResultSent(t *testing.T) {
+	var capturedReq openAIRequest
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&capturedReq); err != nil {
+			http.Error(w, "bad body", http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"done"}}]}`)) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	c := &OpenAIChatClient{
+		APIKey:     "sk-test",
+		BaseURL:    srv.URL,
+		Model:      defaultOpenAIModel,
+		httpClient: srv.Client(),
+	}
+
+	// Simulate the conversation history after one tool invocation:
+	//   system → user → assistant(tool_call) → tool(result)
+	msgs := []Message{
+		{Role: RoleSystem, Content: "You are a test assistant."},
+		{Role: RoleUser, Content: "echo hello"},
+		// The assistant requested an echo tool call in the previous turn.
+		{Role: RoleAssistant, ToolCalls: []ToolCall{{
+			ID: "call_abc", Name: "echo", Arguments: `{"text":"hello"}`,
+		}}},
+		// The tool result is appended before the next LLM call.
+		{Role: RoleTool, ToolCallID: "call_abc", Content: "hello"},
+	}
+
+	if _, err := c.Respond(context.Background(), msgs); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(capturedReq.Messages) != 4 {
+		t.Fatalf("wire message count = %d, want 4", len(capturedReq.Messages))
+	}
+
+	// ── assistant message (index 2) ──────────────────────────────────────
+	asstWire := capturedReq.Messages[2]
+	if asstWire.Role != RoleAssistant {
+		t.Errorf("messages[2].role = %q, want %q", asstWire.Role, RoleAssistant)
+	}
+	// content must be absent (empty after null decode → omitempty drops it)
+	if asstWire.Content != "" {
+		t.Errorf("messages[2].content = %q, want empty", asstWire.Content)
+	}
+	if len(asstWire.ToolCalls) != 1 {
+		t.Fatalf("messages[2].tool_calls len = %d, want 1", len(asstWire.ToolCalls))
+	}
+	wtc := asstWire.ToolCalls[0]
+	if wtc.ID != "call_abc" {
+		t.Errorf("tool_calls[0].id = %q, want %q", wtc.ID, "call_abc")
+	}
+	if wtc.Type != "function" {
+		t.Errorf("tool_calls[0].type = %q, want %q", wtc.Type, "function")
+	}
+	if wtc.Function.Name != "echo" {
+		t.Errorf("tool_calls[0].function.name = %q, want %q", wtc.Function.Name, "echo")
+	}
+	if wtc.Function.Arguments != `{"text":"hello"}` {
+		t.Errorf("tool_calls[0].function.arguments = %q, want %q",
+			wtc.Function.Arguments, `{"text":"hello"}`)
+	}
+
+	// ── tool result message (index 3) ────────────────────────────────────
+	toolWire := capturedReq.Messages[3]
+	if toolWire.Role != RoleTool {
+		t.Errorf("messages[3].role = %q, want %q", toolWire.Role, RoleTool)
+	}
+	if toolWire.ToolCallID != "call_abc" {
+		t.Errorf("messages[3].tool_call_id = %q, want %q", toolWire.ToolCallID, "call_abc")
+	}
+	if toolWire.Content != "hello" {
+		t.Errorf("messages[3].content = %q, want %q", toolWire.Content, "hello")
+	}
+}
+
+// ── Phase 2 c2: tool schema wire tests ───────────────────────────────────────
+
+// TestOpenAIChatClientSendsToolSchemas verifies that when OpenAIChatClient has
+// a tools slice set (e.g. via echoToolSpecs()), the outbound request body
+// includes a "tools" array with the correct function name and type.
+func TestOpenAIChatClientSendsToolSchemas(t *testing.T) {
+	var capturedReq openAIRequest
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&capturedReq); err != nil {
+			http.Error(w, "bad body", http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`)) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	c := &OpenAIChatClient{
+		APIKey:     "sk-test",
+		BaseURL:    srv.URL,
+		Model:      defaultOpenAIModel,
+		httpClient: srv.Client(),
+		tools:      echoToolSpecs(), // same initialisation as NewOpenAIChatClientFromEnv
+	}
+
+	if _, err := c.Respond(context.Background(), []Message{{Role: RoleUser, Content: "hi"}}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(capturedReq.Tools) != 1 {
+		t.Fatalf("tools count = %d, want 1", len(capturedReq.Tools))
+	}
+	tool := capturedReq.Tools[0]
+	if tool.Type != "function" {
+		t.Errorf("tools[0].type = %q, want %q", tool.Type, "function")
+	}
+	if tool.Function.Name != "echo" {
+		t.Errorf("tools[0].function.name = %q, want %q", tool.Function.Name, "echo")
+	}
+}
+
+// TestOpenAIChatClientNoToolsFieldWhenNil verifies that when tools is nil
+// (pre-c2 client or test without tools), the wire request omits the "tools"
+// field entirely — OpenAI treats its absence as "no tools available".
+func TestOpenAIChatClientNoToolsFieldWhenNil(t *testing.T) {
+	var capturedBody []byte
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var err error
+		capturedBody, err = io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, "read error", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`)) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	c := &OpenAIChatClient{
+		APIKey:     "sk-test",
+		BaseURL:    srv.URL,
+		Model:      defaultOpenAIModel,
+		httpClient: srv.Client(),
+		// tools: nil — intentionally not set
+	}
+
+	if _, err := c.Respond(context.Background(), []Message{{Role: RoleUser, Content: "hi"}}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if strings.Contains(string(capturedBody), `"tools"`) {
+		t.Errorf("request body should not contain 'tools' when client.tools is nil; got: %s", capturedBody)
 	}
 }
